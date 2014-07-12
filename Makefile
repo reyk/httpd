@@ -7,7 +7,7 @@ MAN=		httpd.8 httpd.conf.5
 
 LDADD=		-levent -lssl -lcrypto -lutil
 DPADD=		${LIBEVENT} ${LIBSSL} ${LIBCRYPTO} ${LIBUTIL}
-
+DEBUG=		-g -DDEBUG=3
 CFLAGS+=	-Wall -I${.CURDIR} -Werror
 CFLAGS+=	-Wstrict-prototypes -Wmissing-prototypes
 CFLAGS+=	-Wmissing-declarations
