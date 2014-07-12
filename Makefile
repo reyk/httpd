@@ -1,4 +1,4 @@
-#	$OpenBSD$
+#	$OpenBSD: Makefile,v 1.20 2014/07/12 23:34:54 reyk Exp $
 
 PROG=		httpd
 SRCS=		parse.y

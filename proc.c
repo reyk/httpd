@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.c,v 1.15 2014/07/11 16:39:10 krw Exp $	*/
+/*	$OpenBSD: proc.c,v 1.1 2014/07/12 23:34:54 reyk Exp $	*/
 
 /*
  * Copyright (c) 2010 - 2014 Reyk Floeter <reyk@openbsd.org>

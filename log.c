@@ -1,4 +1,4 @@
-/*	$OpenBSD: log.c,v 1.22 2014/04/18 16:13:02 reyk Exp $	*/
+/*	$OpenBSD: log.c,v 1.1 2014/07/12 23:34:54 reyk Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
