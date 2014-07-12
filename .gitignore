@@ -2,3 +2,6 @@
 CVS
 obj
 *.manlint
+*~
+*.core
+*.o
