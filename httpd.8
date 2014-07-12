@@ -27,7 +27,7 @@
 .Op Fl f Ar file
 .Sh DESCRIPTION
 .Nm
-is an HTTP server that serves static files.
+is a simple HTTP server that serves static files.
 .El
 .Sh FILES
 .Bl -tag -width "/var/run/httpd.sockXX" -compact
@@ -40,10 +40,16 @@ socket used for communication with
 .El
 .Sh SEE ALSO
 .Xr httpd.conf 5 ,
-.Xr httpctl 8
+.Sh HISTORY
+.Nm
+is based on
+.Xr relayd 8 .
 .Sh AUTHORS
 .An -nosplit
 The
 .Nm
 program was written by
 .An Reyk Floeter Aq Mt reyk@openbsd.org .
+.Sh CAVEATS
+.Nm
+is not finished yet.
