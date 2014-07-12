@@ -268,11 +268,12 @@ parent_configure(struct httpd *env)
 	int			 id;
 	struct ctl_flags	 cf;
 	int			 ret = -1;
+	struct server		*srv;
 
-#if 0
-	TAILQ_FOREACH(srv, env->sc_server, entry)
-		config_setserver(env, srv);
-#endif
+	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
+		if (config_setserver(env, srv) == -1)
+			fatal("create server");
+	}
 
 	/* The servers need to reload their config. */
 	env->sc_reload = env->sc_prefork_server;
@@ -392,13 +393,13 @@ event_again(struct event *ev, int fd, short event,
 	struct timeval tv_next, tv_now, tv;
 
 	getmonotime(&tv_now);
-	bcopy(end, &tv_next, sizeof(tv_next));
+	memcpy(&tv_next, end, sizeof(tv_next));
 	timersub(&tv_now, start, &tv_now);
 	timersub(&tv_next, &tv_now, &tv_next);
 
-	bzero(&tv, sizeof(tv));
+	memset(&tv, 0, sizeof(tv));
 	if (timercmp(&tv_next, &tv, >))
-		bcopy(&tv_next, &tv, sizeof(tv));
+		memcpy(&tv, &tv_next, sizeof(tv));
 
 	event_del(ev);
 	event_set(ev, fd, event, fn, arg);
@@ -431,7 +432,7 @@ canonicalize_host(const char *host, char *name, size_t len)
 
 	/* 1. remove repeated dots and convert upper case to lower case */
 	plen = strlen(host);
-	bzero(name, len);
+	memset(name, 0, len);
 	for (i = j = 0; i < plen; i++) {
 		if (j >= (len - 1))
 			goto fail;

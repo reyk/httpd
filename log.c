@@ -213,7 +213,7 @@ printb_flags(const u_int32_t v, const char *bits)
 	char		 c, *p, *r;
 
 	p = r = buf[++idx % 2];
-	bzero(p, BUFSIZ);
+	memset(p, 0, BUFSIZ);
 
 	if (bits) {
 		bits++;

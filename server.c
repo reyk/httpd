@@ -123,7 +123,7 @@ server_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 #if 0
 	/* Schedule statistics timer */
 	evtimer_set(&env->sc_statev, server_statistics, NULL);
-	bcopy(&env->sc_statinterval, &tv, sizeof(tv));
+	memcpy(&tv, &env->sc_statinterval, sizeof(tv));
 	evtimer_add(&env->sc_statev, &tv);
 #endif
 }
@@ -200,7 +200,7 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 	/*
 	 * Socket options
 	 */
-	bzero(&lng, sizeof(lng));
+	memset(&lng, 0, sizeof(lng));
 	if (setsockopt(s, SOL_SOCKET, SO_LINGER, &lng, sizeof(lng)) == -1)
 		goto bad;
 	if (reuseport) {
@@ -460,7 +460,7 @@ server_accept(int fd, short event, void *arg)
 	memcpy(&clt->clt_ss, &ss, sizeof(clt->clt_ss));
 
 	getmonotime(&clt->clt_tv_start);
-	bcopy(&clt->clt_tv_start, &clt->clt_tv_last, sizeof(clt->clt_tv_last));
+	memcpy(&clt->clt_tv_last, &clt->clt_tv_start, sizeof(clt->clt_tv_last));
 
 	server_clients++;
 	SPLAY_INSERT(client_tree, &srv->srv_clients, clt);
@@ -513,10 +513,10 @@ server_close(struct client *clt, const char *msg)
 		bufferevent_disable(clt->clt_bev, EV_READ|EV_WRITE);
 
 	if ((env->sc_opts & HTTPD_OPT_LOGUPDATE) && msg != NULL) {
-		bzero(&ibuf, sizeof(ibuf));
-		bzero(&obuf, sizeof(obuf));
+		memset(&ibuf, 0, sizeof(ibuf));
+		memset(&obuf, 0, sizeof(obuf));
 		(void)print_host(&clt->clt_ss, ibuf, sizeof(ibuf));
-		(void)print_host(&srv->srv_ss, obuf, sizeof(obuf));
+		(void)print_host(&srv->srv_conf.ss, obuf, sizeof(obuf));
 		if (EVBUFFER_LENGTH(clt->clt_log) &&
 		    evbuffer_add_printf(clt->clt_log, "\r\n") != -1)
 			ptr = evbuffer_readline(clt->clt_log);
@@ -557,11 +557,9 @@ int
 server_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	switch (imsg->hdr.type) {
-#if 0
 	case IMSG_CFG_SERVER:
 		config_getserver(env, imsg);
 		break;
-#endif
 	case IMSG_CFG_DONE:
 		config_getcfg(env, imsg);
 		break;

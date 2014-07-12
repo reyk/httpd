@@ -130,6 +130,7 @@ typedef struct {
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
 %type	<v.number>	loglevel
+%type	<v.port>	port
 
 %%
 
@@ -231,8 +232,71 @@ serveropts_l	: serveropts_l serveroptsl nl
 		| serveroptsl optnl
 		;
 
-serveroptsl	: LISTEN ON STRING PORT NUMBER {
+serveroptsl	: LISTEN ON STRING port {
+			struct addresslist	 al;
+			struct address		*h;
+			struct server		*s;
+
+			if (srv->srv_conf.ss.ss_family != AF_UNSPEC) {
+				yyerror("listen address already specified");
+				free($3);
+				YYERROR;
+			} else
+				s = srv;
+			if ($4.op != PF_OP_EQ) {
+				yyerror("invalid port");
+				free($3);
+				YYERROR;
+			}
+
+			TAILQ_INIT(&al);
+			if (host($3, &al, 1, &$4, NULL, -1) <= 0) {
+				yyerror("invalid listen ip: %s", $3);
+				free($3);
+				YYERROR;
+			}
 			free($3);
+			h = TAILQ_FIRST(&al);
+			memcpy(&srv->srv_conf.ss, &h->ss,
+			    sizeof(s->srv_conf.ss));
+			s->srv_conf.port = h->port.val[0];
+			host_free(&al);
+		}
+		;
+
+port		: PORT STRING {
+			char		*a, *b;
+			int		 p[2];
+
+			p[0] = p[1] = 0;
+
+			a = $2;
+			b = strchr($2, ':');
+			if (b == NULL)
+				$$.op = PF_OP_EQ;
+			else {
+				*b++ = '\0';
+				if ((p[1] = getservice(b)) == -1) {
+					free($2);
+					YYERROR;
+				}
+				$$.op = PF_OP_RRG;
+			}
+			if ((p[0] = getservice(a)) == -1) {
+				free($2);
+				YYERROR;
+			}
+			$$.val[0] = p[0];
+			$$.val[1] = p[1];
+			free($2);
+		}
+		| PORT NUMBER {
+			if ($2 <= 0 || $2 >= (int)USHRT_MAX) {
+				yyerror("invalid port: %d", $2);
+				YYERROR;
+			}
+			$$.val[0] = htons($2);
+			$$.op = PF_OP_EQ;
 		}
 		;
 
@@ -784,7 +848,7 @@ host_v4(const char *s)
 	struct sockaddr_in	*sain;
 	struct address		*h;
 
-	bzero(&ina, sizeof(ina));
+	memset(&ina, 0, sizeof(ina));
 	if (inet_pton(AF_INET, s, &ina) != 1)
 		return (NULL);
 
@@ -805,7 +869,7 @@ host_v6(const char *s)
 	struct sockaddr_in6	*sa_in6;
 	struct address		*h = NULL;
 
-	bzero(&hints, sizeof(hints));
+	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_INET6;
 	hints.ai_socktype = SOCK_DGRAM; /* dummy */
 	hints.ai_flags = AI_NUMERICHOST;
@@ -840,7 +904,7 @@ host_dns(const char *s, struct addresslist *al, int max,
 	if ((cnt = host_if(s, al, max, port, ifname, ipproto)) != 0)
 		return (cnt);
 
-	bzero(&hints, sizeof(hints));
+	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = PF_UNSPEC;
 	hints.ai_socktype = SOCK_DGRAM; /* DUMMY */
 	error = getaddrinfo(s, NULL, &hints, &res0);
@@ -860,7 +924,7 @@ host_dns(const char *s, struct addresslist *al, int max,
 			fatal(NULL);
 
 		if (port != NULL)
-			bcopy(port, &h->port, sizeof(h->port));
+			memcpy(&h->port, port, sizeof(h->port));
 		if (ifname != NULL) {
 			if (strlcpy(h->ifname, ifname, sizeof(h->ifname)) >=
 			    sizeof(h->ifname))
@@ -923,7 +987,7 @@ host_if(const char *s, struct addresslist *al, int max,
 			fatal("calloc");
 
 		if (port != NULL)
-			bcopy(port, &h->port, sizeof(h->port));
+			memcpy(&h->port, port, sizeof(h->port));
 		if (ifname != NULL) {
 			if (strlcpy(h->ifname, ifname, sizeof(h->ifname)) >=
 			    sizeof(h->ifname))
@@ -981,7 +1045,7 @@ host(const char *s, struct addresslist *al, int max,
 
 	if (h != NULL) {
 		if (port != NULL)
-			bcopy(port, &h->port, sizeof(h->port));
+			memcpy(&h->port, port, sizeof(h->port));
 		if (ifname != NULL) {
 			if (strlcpy(h->ifname, ifname, sizeof(h->ifname)) >=
 			    sizeof(h->ifname)) {
@@ -999,6 +1063,17 @@ host(const char *s, struct addresslist *al, int max,
 	}
 
 	return (host_dns(s, al, max, port, ifname, ipproto));
+}
+
+void
+host_free(struct addresslist *al)
+{
+	struct address	 *h;
+
+	while ((h = TAILQ_FIRST(al)) != NULL) {
+		TAILQ_REMOVE(al, h, entry);
+		free(h);
+	}
 }
 
 int

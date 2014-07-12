@@ -137,5 +137,90 @@ config_getcfg(struct httpd *env, struct imsg *imsg)
 
 	what = ps->ps_what[privsep_process];
 
+	if (privsep_process != PROC_PARENT)
+		proc_compose_imsg(env->sc_ps, PROC_PARENT, -1,
+		    IMSG_CFG_DONE, -1, NULL, 0);
+
+	return (0);
+}
+
+int
+config_setserver(struct httpd *env, struct server *srv)
+{
+	struct privsep		*ps = env->sc_ps;
+	struct server_config	 s;
+	int			 id;
+	int			 fd, n, m;
+	struct iovec		 iov[6];
+	size_t			 c;
+	u_int			 what;
+
+	/* opens listening sockets etc. */
+	if (server_privinit(srv) == -1)
+		return (-1);
+
+	for (id = 0; id < PROC_MAX; id++) {
+		what = ps->ps_what[id];
+
+		if ((what & CONFIG_SERVERS) == 0 || id == privsep_process)
+			continue;
+
+		DPRINTF("%s: sending server %s to %s fd %d", __func__,
+		    srv->srv_conf.name, ps->ps_title[id], srv->srv_s);
+
+		memcpy(&s, &srv->srv_conf, sizeof(s));
+
+		c = 0;
+		iov[c].iov_base = &s;
+		iov[c++].iov_len = sizeof(s);
+
+		if (id == PROC_SERVER) {
+			/* XXX imsg code will close the fd after 1st call */
+			n = -1;
+			proc_range(ps, id, &n, &m);
+			for (n = 0; n < m; n++) {
+				if ((fd = dup(srv->srv_s)) == -1)
+					return (-1);
+				proc_composev_imsg(ps, id, n,
+				    IMSG_CFG_SERVER, fd, iov, c);
+			}
+		} else {
+			proc_composev_imsg(ps, id, -1, IMSG_CFG_SERVER, -1,
+			    iov, c);
+		}
+	}
+
+	close(srv->srv_s);
+	srv->srv_s = -1;
+
+	return (0);
+}
+
+int
+config_getserver(struct httpd *env, struct imsg *imsg)
+{
+	struct privsep		*ps = env->sc_ps;
+	struct server		*srv;
+	u_int8_t		*p = imsg->data;
+	size_t			 s;
+
+	if ((srv = calloc(1, sizeof(*srv))) == NULL) {
+		close(imsg->fd);
+		return (-1);
+	}
+
+	IMSG_SIZE_CHECK(imsg, &srv->srv_conf);
+	memcpy(&srv->srv_conf, p, sizeof(srv->srv_conf));
+	s = sizeof(srv->srv_conf);
+
+	srv->srv_s = imsg->fd;
+
+	SPLAY_INIT(&srv->srv_clients);
+	TAILQ_INSERT_TAIL(env->sc_servers, srv, srv_entry);
+
+	DPRINTF("%s: %s %d received configuration \"%s\"", __func__,
+	    ps->ps_title[privsep_process], ps->ps_instance,
+	    srv->srv_conf.name);
+
 	return (0);
 }

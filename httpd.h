@@ -69,7 +69,6 @@ enum httpchunk {
 
 #if DEBUG > 1
 #define DPRINTF		log_debug
-#define DEBUG_CERT	1
 #else
 #define DPRINTF(x...)	do {} while(0)
 #endif
@@ -152,6 +151,7 @@ enum imsg_type {
 	IMSG_CTL_NOTIFY,
 	IMSG_CTL_END,
 	IMSG_CTL_START,
+	IMSG_CFG_SERVER,
 	IMSG_CFG_DONE
 };
 
@@ -259,8 +259,6 @@ struct server {
 	u_int8_t		 srv_tcpipminttl;
 
 	int			 srv_s;
-	in_port_t		 src_port;
-	struct sockaddr_storage	 srv_ss;
 	struct bufferevent	*srv_bev;
 	int			 srv_dsts;
 	struct bufferevent	*srv_dstbev;
@@ -391,5 +389,7 @@ void	 config_purge(struct httpd *, u_int);
 int	 config_setreset(struct httpd *, u_int);
 int	 config_getreset(struct httpd *, struct imsg *);
 int	 config_getcfg(struct httpd *, struct imsg *);
+int	 config_setserver(struct httpd *, struct server *);
+int	 config_getserver(struct httpd *, struct imsg *);
 
 #endif /* _HTTPD_H */
