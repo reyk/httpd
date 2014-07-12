@@ -61,8 +61,10 @@ server_response(struct client *clt)
 		goto fail;
 
 	/* 
-	 * XXX hardcode XXX
+	 * XXX This is not ready XXX
+	 * XXX Don't expect anything from this code yet,
 	 */
+
 	strlcpy(path, "/htdocs", sizeof(path));
 	if (desc->http_path[0] != '/')
 		strlcat(path, "/", sizeof(path));
@@ -88,6 +90,7 @@ server_response(struct client *clt)
 	if ((fd = open(path, O_RDONLY)) == -1 || fstat(fd, &st) == -1)
 		goto fail;
 
+	/* XXX verify results XXX */
 	kv_purge(&desc->http_headers);
 	kv_add(&desc->http_headers, "Server", HTTPD_SERVERNAME);
 	kv_add(&desc->http_headers, "Connection", "close");
