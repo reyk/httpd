@@ -125,7 +125,7 @@ typedef struct {
 
 %}
 
-%token	ALL PORT LISTEN PREFORK SERVER ERROR INCLUDE LOG VERBOSE
+%token	ALL PORT LISTEN PREFORK SERVER ERROR INCLUDE LOG VERBOSE ON
 %token	UPDATES INCLUDE
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
@@ -183,7 +183,56 @@ main		: LOG loglevel		{
 		;
 
 server		: SERVER STRING		{
+			struct server	*s;
+
+			if (!loadcfg) {
+				free($2);
+				YYACCEPT;
+			}
+
+			TAILQ_FOREACH(s, conf->sc_servers, srv_entry)
+				if (!strcmp(s->srv_conf.name, $2))
+					break;
+			if (s != NULL) {
+				yyerror("server %s defined twice", $2);
+				free($2);
+				YYERROR;
+			}
+
+			if ((s = calloc(1, sizeof (*s))) == NULL)
+				fatal("out of memory");
+
+			if (strlcpy(s->srv_conf.name, $2,
+			    sizeof(s->srv_conf.name)) >=
+			    sizeof(s->srv_conf.name)) {
+				yyerror("server name truncated");
+				free($2);
+				free(s);
+				YYERROR;
+			}
 			free($2);
+
+			s->srv_conf.id = ++last_server_id;
+			s->srv_conf.timeout.tv_sec = SERVER_TIMEOUT;
+
+			if (last_server_id == INT_MAX) {
+				yyerror("too many servers defined");
+				free(s);
+				YYERROR;
+			}
+			srv = s;
+		} '{' optnl serveropts_l '}'	{
+			SPLAY_INIT(&srv->srv_clients);
+			TAILQ_INSERT_TAIL(conf->sc_servers, srv, srv_entry);
+		}
+		;
+
+serveropts_l	: serveropts_l serveroptsl nl
+		| serveroptsl optnl
+		;
+
+serveroptsl	: LISTEN ON STRING PORT NUMBER {
+			free($3);
 		}
 		;
 
@@ -241,6 +290,7 @@ lookup(char *s)
 		{ "include",		INCLUDE },
 		{ "listen",		LISTEN },
 		{ "log",		LOG },
+		{ "on",			ON },
 		{ "port",		PORT },
 		{ "prefork",		PREFORK },
 		{ "server",		SERVER },

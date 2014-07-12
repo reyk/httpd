@@ -64,16 +64,10 @@ config_init(struct httpd *env)
 	what = ps->ps_what[privsep_process];
 
 	if (what & CONFIG_SERVERS) {
-#if 0
 		if ((env->sc_servers =
-		    calloc(1, sizeof(*env->sc_relays))) == NULL)
+		    calloc(1, sizeof(*env->sc_servers))) == NULL)
 			return (-1);
-		TAILQ_INIT(env->sc_relays);
-		if ((env->sc_pkeys =
-		    calloc(1, sizeof(*env->sc_pkeys))) == NULL)
-			return (-1);
-		TAILQ_INIT(env->sc_pkeys);
-#endif
+		TAILQ_INIT(env->sc_servers);
 	}
 
 	return (0);
