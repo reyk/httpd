@@ -1,0 +1,18 @@
+#	$OpenBSD$
+
+PROG=		httpd
+SRCS=		parse.y
+SRCS+=		config.c control.c httpd.c log.c proc.c	server.c
+MAN=		httpd.8 httpd.conf.5
+
+LDADD=		-levent -lssl -lcrypto -lutil
+DPADD=		${LIBEVENT} ${LIBSSL} ${LIBCRYPTO} ${LIBUTIL}
+
+CFLAGS+=	-Wall -I${.CURDIR} -Werror
+CFLAGS+=	-Wstrict-prototypes -Wmissing-prototypes
+CFLAGS+=	-Wmissing-declarations
+CFLAGS+=	-Wshadow -Wpointer-arith
+CFLAGS+=	-Wsign-compare
+CLEANFILES+=	y.tab.h
+
+.include <bsd.prog.mk>
