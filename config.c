@@ -199,7 +199,9 @@ config_setserver(struct httpd *env, struct server *srv)
 int
 config_getserver(struct httpd *env, struct imsg *imsg)
 {
+#ifdef DEBUG
 	struct privsep		*ps = env->sc_ps;
+#endif
 	struct server		*srv;
 	u_int8_t		*p = imsg->data;
 	size_t			 s;

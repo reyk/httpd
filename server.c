@@ -82,7 +82,7 @@ server(struct privsep *ps, struct privsep_proc *p)
 	pid_t	 pid;
 	env = ps->ps_env;
 	pid = proc_run(ps, p, procs, nitems(procs), server_init, NULL);
-//	server_http(env);
+	server_http(env);
 	return (pid);
 }
 
@@ -108,6 +108,8 @@ server_privinit(struct server *srv)
 void
 server_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 {
+	server_http(ps->ps_env);
+
 	if (config_init(ps->ps_env) == -1)
 		fatal("failed to initialize configuration");
 
@@ -134,7 +136,7 @@ server_launch(void)
 	struct server		*srv;
 
 	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
-//		server_http_init(srv);
+		server_http_init(srv);
 
 		log_debug("%s: running server %s", __func__,
 		    srv->srv_conf.name);
@@ -296,15 +298,14 @@ server_input(struct client *clt)
 	evbuffercb	 inrd = server_read;
 	evbuffercb	 inwr = server_write;
 
-#if 0
-	if (server_httpdesc_init(&clt->clt_in) == -1) {
+	if (server_httpdesc_init(clt) == -1) {
 		server_close(clt,
 		    "failed to allocate http descriptor");
 		return;
 	}
-#endif
+
 	clt->clt_toread = TOREAD_HTTP_HEADER;
-//	inrd = server_read_http;
+	inrd = server_read_http;
 
 	/*
 	 * Client <-> Server
@@ -370,8 +371,7 @@ server_read(struct bufferevent *bev, void *arg)
 		goto fail;
 	if (clt->clt_done)
 		goto done;
-	if (clt->clt_bev)
-		bufferevent_enable(clt->clt_bev, EV_READ);
+	bufferevent_enable(bev, EV_READ);
 	return;
  done:
 	server_close(clt, "done");
@@ -390,7 +390,7 @@ server_error(struct bufferevent *bev, short error, void *arg)
 		return;
 	}
 	if (error & EVBUFFER_ERROR && errno == EFBIG) {
-		bufferevent_enable(clt->clt_bev, EV_READ);
+		bufferevent_enable(bev, EV_READ);
 		return;
 	}
 	if (error & (EVBUFFER_READ|EVBUFFER_WRITE|EVBUFFER_EOF)) {
@@ -444,6 +444,7 @@ server_accept(int fd, short event, void *arg)
 		goto err;
 
 	clt->clt_s = s;
+	clt->clt_fd = -1;
 	clt->clt_toread = TOREAD_UNLIMITED;
 	clt->clt_server = srv;
 	clt->clt_id = ++server_cltid;
@@ -511,6 +512,8 @@ server_close(struct client *clt, const char *msg)
 	event_del(&clt->clt_ev);
 	if (clt->clt_bev != NULL)
 		bufferevent_disable(clt->clt_bev, EV_READ|EV_WRITE);
+	if (clt->clt_file != NULL)
+		bufferevent_disable(clt->clt_file, EV_READ|EV_WRITE);
 
 	if ((env->sc_opts & HTTPD_OPT_LOGUPDATE) && msg != NULL) {
 		memset(&ibuf, 0, sizeof(ibuf));
@@ -533,6 +536,12 @@ server_close(struct client *clt, const char *msg)
 		bufferevent_free(clt->clt_bev);
 	else if (clt->clt_output != NULL)
 		evbuffer_free(clt->clt_output);
+
+	if (clt->clt_file != NULL)
+		bufferevent_free(clt->clt_file);
+	if (clt->clt_fd != -1)
+		close(clt->clt_fd);
+
 	if (clt->clt_s != -1) {
 		close(clt->clt_s);
 		if (/* XXX */ -1) {

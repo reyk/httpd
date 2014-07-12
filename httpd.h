@@ -78,6 +78,36 @@ struct ctl_flags {
 	u_int32_t	 cf_flags;
 };
 
+enum key_type {
+	KEY_TYPE_NONE		= 0,
+	KEY_TYPE_COOKIE,
+	KEY_TYPE_HEADER,
+	KEY_TYPE_PATH,
+	KEY_TYPE_QUERY,
+	KEY_TYPE_URL,
+	KEY_TYPE_MAX
+};
+
+TAILQ_HEAD(kvlist, kv);
+RB_HEAD(kvtree, kv);
+
+struct kv {
+	char			*kv_key;
+	char			*kv_value;
+
+	enum key_type		 kv_type;
+
+#define KV_FLAG_INVALID		 0x01
+#define KV_FLAG_GLOBBING	 0x02
+	u_int8_t		 kv_flags;
+
+	struct kvlist		 kv_children;
+	struct kv		*kv_parent;
+	TAILQ_ENTRY(kv)		 kv_entry;
+
+	RB_ENTRY(kv)		 kv_node;
+};
+
 struct portrange {
 	in_port_t		 val[2];
 	u_int8_t		 op;
@@ -223,6 +253,10 @@ struct client {
 	struct bufferevent	*clt_bev;
 	struct evbuffer		*clt_output;
 	struct event		 clt_ev;
+	void			*clt_desc;
+
+	int			 clt_fd;
+	struct bufferevent	*clt_file;
 
 	off_t			 clt_toread;
 	int			 clt_line;
@@ -329,6 +363,28 @@ int	 server_bufferevent_write(struct client *, void *, size_t);
 
 SPLAY_PROTOTYPE(client_tree, client, clt_nodes, server_client_cmp);
 
+/* server_http.c */
+void	 server_http_init(struct server *);
+void	 server_http(struct httpd *);
+int	 server_httpdesc_init(struct client *);
+void	 server_read_http(struct bufferevent *, void *);
+void	 server_abort_http(struct client *, u_int, const char *);
+u_int	 server_httpmethod_byname(const char *);
+const char
+	*server_httpmethod_byid(u_int);
+const char
+	*server_httperror_byid(u_int);
+void	 server_read_httpcontent(struct bufferevent *, void *);
+void	 server_read_httpchunks(struct bufferevent *, void *);
+int	 server_writeheader_kv(struct client *, struct kv *);
+int	 server_writeheader_http(struct client *);
+int	 server_writeresponse_http(struct client *);
+void	 server_reset_http(struct client *);
+void	 server_close_http(struct client *);
+
+/* server_file.c */
+int	 server_response(struct client *);
+
 /* httpd.c */
 void		 event_again(struct event *, int, short,
 		    void (*)(int, short, void *),
@@ -342,6 +398,18 @@ char		*get_string(u_int8_t *, size_t);
 void		*get_data(u_int8_t *, size_t);
 int		 accept_reserve(int, struct sockaddr *, socklen_t *, int,
 		     volatile int *);
+struct kv	*kv_add(struct kvtree *, char *, char *);
+int		 kv_set(struct kv *, char *, ...);
+int		 kv_setkey(struct kv *, char *, ...);
+void		 kv_delete(struct kvtree *, struct kv *);
+struct kv	*kv_extend(struct kvtree *, struct kv *, char *);
+void		 kv_purge(struct kvtree *);
+void		 kv_free(struct kv *);
+struct kv	*kv_inherit(struct kv *, struct kv *);
+int		 kv_log(struct evbuffer *, struct kv *);
+struct kv	*kv_find(struct kvtree *, struct kv *);
+int		 kv_cmp(struct kv *, struct kv *);
+RB_PROTOTYPE(kvtree, kv, kv_node, kv_cmp);
 
 /* log.c */
 void	log_init(int);

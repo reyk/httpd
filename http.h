@@ -119,4 +119,21 @@ struct http_error {
 	{ 0,	NULL }					\
 }
 
+/* Used during runtime */
+struct http_descriptor {
+	struct kv		 http_pathquery;
+#define http_path		 http_pathquery.kv_key
+#define http_query		 http_pathquery.kv_value
+#define http_rescode		 http_pathquery.kv_key
+#define http_resmesg		 http_pathquery.kv_value
+
+	char			*http_version;
+	enum httpmethod		 http_method;
+	int			 http_chunked;
+
+	/* A tree of headers and attached lists for repeated headers. */
+	struct kvtree		 http_headers;
+	struct kv		*http_lastheader;
+};
+
 #endif /* _HTTPD_HTTP_H */
