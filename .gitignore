@@ -1,2 +1,4 @@
 .cvsignore
 CVS
+obj
+*.manlint
