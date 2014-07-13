@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_file.c,v 1.1 2014/07/12 23:34:54 reyk Exp $	*/
+/*	$OpenBSD: server_file.c,v 1.3 2014/07/13 15:07:50 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -124,6 +124,9 @@ server_response(struct httpd *env, struct client *clt)
 		goto fail;
 
 	clt->clt_fd = fd;
+	clt->clt_persist = 0;
+	if (clt->clt_file != NULL)
+		bufferevent_free(clt->clt_file);
 	clt->clt_file = bufferevent_new(clt->clt_fd, server_read,
 	    server_write, server_error, clt);
 	if (clt->clt_file == NULL) {
@@ -133,7 +136,7 @@ server_response(struct httpd *env, struct client *clt)
 
 	bufferevent_settimeout(clt->clt_file,
 	    srv->srv_conf.timeout.tv_sec, srv->srv_conf.timeout.tv_sec);
-	bufferevent_enable(clt->clt_file, EV_READ|EV_WRITE);
+	bufferevent_enable(clt->clt_file, EV_READ);
 
 	return (0);
  fail:
