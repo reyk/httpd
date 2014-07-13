@@ -566,6 +566,9 @@ int
 server_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	switch (imsg->hdr.type) {
+	case IMSG_CFG_MEDIA:
+		config_getmedia(env, imsg);
+		break;
 	case IMSG_CFG_SERVER:
 		config_getserver(env, imsg);
 		break;

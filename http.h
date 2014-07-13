@@ -119,6 +119,24 @@ struct http_error {
 	{ 0,	NULL }					\
 }
 
+struct http_mediatype {
+	char		*media_name;
+	char		*media_type;
+	char		*media_subtype;
+};
+/* Some default media types */
+#define MEDIA_TYPES		{			\
+	{ "css",	"text",		"css" },	\
+	{ "html",	"text",		"html" },	\
+	{ "txt",	"text",		"plain" },	\
+	{ "gif",	"image",	"gif" },	\
+	{ "jpeg",	"image",	"jpeg" },	\
+	{ "jpg",	"image",	"jpeg" },	\
+	{ "png",	"image",	"png" },	\
+	{ "js",		"application",	"javascript" },	\
+	{ NULL }					\
+}
+
 /* Used during runtime */
 struct http_descriptor {
 	struct kv		 http_pathquery;
