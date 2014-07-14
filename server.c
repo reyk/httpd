@@ -412,7 +412,7 @@ server_error(struct bufferevent *bev, short error, void *arg)
 			return;
 
 		if (clt->clt_persist) {
-			server_reset_http(clt);
+			server_reset_http(clt, 1);
 			bufferevent_enable(clt->clt_bev, EV_READ|EV_WRITE);
 			return;
 		} else

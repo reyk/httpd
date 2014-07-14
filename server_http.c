@@ -321,7 +321,6 @@ server_read_http(struct bufferevent *bev, void *arg)
 		if (clt->clt_toread <= 0) {
 			if (server_response(env, clt) == -1)
 				return;
-			clt->clt_done = 0;
 		}
 	}
 	if (clt->clt_done) {
@@ -502,18 +501,23 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 }
 
 void
-server_reset_http(struct client *clt)
+server_reset_http(struct client *clt, int all)
 {
 	struct http_descriptor	*desc = clt->clt_desc;
 
-	server_httpdesc_free(desc);
 	desc->http_method = 0;
 	desc->http_chunked = 0;
+	desc->http_lastheader = NULL;
 	clt->clt_headerlen = 0;
 	clt->clt_line = 0;
 	clt->clt_done = 0;
 	clt->clt_toread = TOREAD_HTTP_HEADER;
 	clt->clt_bev->readcb = server_read_http;
+
+	if (!all)
+		return;
+
+	server_httpdesc_free(desc);
 	if (clt->clt_fd != -1) {
 		close(clt->clt_fd);
 		clt->clt_fd = -1;

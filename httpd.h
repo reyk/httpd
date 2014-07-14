@@ -398,7 +398,7 @@ int	 server_writeheader_http(struct client *);
 int	 server_writeresponse_http(struct client *);
 int	 server_response_http(struct client *, u_int, struct media_type *,
 	    size_t);
-void	 server_reset_http(struct client *);
+void	 server_reset_http(struct client *, int);
 void	 server_close_http(struct client *);
 int	 server_response(struct httpd *, struct client *);
 
