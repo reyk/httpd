@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.1 2014/07/12 23:34:54 reyk Exp $	*/
+/*	$OpenBSD: server.c,v 1.5 2014/07/14 00:19:48 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -326,6 +326,11 @@ void
 server_write(struct bufferevent *bev, void *arg)
 {
 	struct client		*clt = arg;
+	struct evbuffer		*dst = EVBUFFER_OUTPUT(bev);
+
+	if (EVBUFFER_LENGTH(dst) == 0 &&
+	    clt->clt_toread == TOREAD_HTTP_NONE)
+		goto done;
 
 	getmonotime(&clt->clt_tv_last);
 
@@ -384,6 +389,7 @@ void
 server_error(struct bufferevent *bev, short error, void *arg)
 {
 	struct client		*clt = arg;
+	struct evbuffer		*dst;
 
 	if (error & EVBUFFER_TIMEOUT) {
 		server_close(clt, "buffer event timeout");
@@ -398,8 +404,20 @@ server_error(struct bufferevent *bev, short error, void *arg)
 
 		clt->clt_done = 1;
 
+		if (bev != clt->clt_bev) {
+			dst = EVBUFFER_OUTPUT(clt->clt_bev);
+			if (EVBUFFER_LENGTH(dst))
+				return;
+		} else
+			return;
+
+		if (clt->clt_persist) {
+			server_reset_http(clt);
+			bufferevent_enable(clt->clt_bev, EV_READ|EV_WRITE);
+			return;
+		} else
+			server_close(clt, "done");
 		return;
-//		server_close(con, "done");
 	}
 	server_close(clt, "buffer event error");
 	return;
