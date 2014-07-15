@@ -84,7 +84,29 @@ server_file(struct httpd *env, struct client *clt)
 		return (-1);
 	}
 
-	if ((fd = open(path, O_RDONLY)) == -1 || fstat(fd, &st) == -1)
+	if ((fd = open(path, O_RDONLY)) == -1) {
+		/*
+		 * Pause accept if we are out of file descriptors, or
+		 * libevent will haunt us here too.
+		 */
+		if (errno == ENFILE || errno == EMFILE) {
+			struct timeval evtpause = { 1, 0 };
+
+			event_del(&srv->srv_ev);
+			evtimer_add(&srv->srv_evt, &evtpause);
+			log_debug("%s: deferring connections", __func__);
+			return (0);
+		}
+	}
+
+	if (clt->clt_persist <= 1) {
+		server_inflight--;
+		DPRINTF("%s: inflight decremented, now %d",
+		    __func__, server_inflight);
+		event_add(&srv->srv_ev, NULL);
+	}
+
+	if (fstat(fd, &st) == -1)
 		goto fail;
 
 	media = media_find(env->sc_mediatypes, path);
@@ -112,7 +134,7 @@ server_file(struct httpd *env, struct client *clt)
 
 	bufferevent_settimeout(clt->clt_file,
 	    srv->srv_conf.timeout.tv_sec, srv->srv_conf.timeout.tv_sec);
-	bufferevent_enable(clt->clt_file, EV_READ);
+	bufferevent_enable(clt->clt_file, EV_READ|EV_WRITE);
 
 	return (0);
  fail:

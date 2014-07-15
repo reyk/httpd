@@ -341,6 +341,8 @@ struct httpd {
 #define HTTPD_OPT_LOGNOTIFY		0x10
 #define HTTPD_OPT_LOGALL		0x18
 
+extern volatile int server_inflight;
+
 /* control.c */
 int	 control_init(struct privsep *, struct control_sock *);
 int	 control_listen(struct control_sock *);

@@ -448,7 +448,8 @@ server_accept(int fd, short event, void *arg)
 
 			event_del(&srv->srv_ev);
 			evtimer_add(&srv->srv_evt, &evtpause);
-			log_debug("%s: deferring connections", __func__);
+			log_debug("%s: deferring connections %d",
+			    __func__, getdtablecount());
 		}
 		return;
 	}
@@ -555,14 +556,9 @@ server_close(struct client *clt, const char *msg)
 	else if (clt->clt_output != NULL)
 		evbuffer_free(clt->clt_output);
 
-	if (clt->clt_file != NULL)
-		bufferevent_free(clt->clt_file);
-	if (clt->clt_fd != -1)
-		close(clt->clt_fd);
-
 	if (clt->clt_s != -1) {
 		close(clt->clt_s);
-		if (/* XXX */ -1) {
+		if (clt->clt_fd == -1 && 0) {
 			/*
 			 * the output was never connected,
 			 * thus this was an inflight client.
@@ -572,6 +568,11 @@ server_close(struct client *clt, const char *msg)
 			    __func__, server_inflight);
 		}
 	}
+
+	if (clt->clt_file != NULL)
+		bufferevent_free(clt->clt_file);
+	if (clt->clt_fd != -1)
+		close(clt->clt_fd);
 
 	if (clt->clt_log != NULL)
 		evbuffer_free(clt->clt_log);

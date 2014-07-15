@@ -502,9 +502,13 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 }
 
 void
-server_reset_http(struct client *clt, int done)
+server_reset_http(struct client *clt, int all)
 {
 	struct http_descriptor	*desc = clt->clt_desc;
+
+	log_debug("%s: method %s done %d count %d fd %d p %d", __func__,
+	    server_httpmethod_byid(desc->http_method), all,
+	    getdtablecount(), clt->clt_fd, clt->clt_persist);
 
 	server_httpdesc_free(desc);
 	desc->http_method = 0;
@@ -514,7 +518,7 @@ server_reset_http(struct client *clt, int done)
 	clt->clt_line = 0;
 	clt->clt_done = 0;
 
-	if (!done)
+	if (!all)
 		return;
 
 	clt->clt_toread = TOREAD_HTTP_HEADER;
