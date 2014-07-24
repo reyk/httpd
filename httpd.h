@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.3 2014/07/14 00:19:48 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.7 2014/07/23 19:03:56 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -31,6 +31,8 @@
 #define HTTPD_SOCKET		"/var/run/httpd.sock"
 #define HTTPD_USER		"www"
 #define HTTPD_SERVERNAME	"OpenBSD httpd"
+#define HTTPD_DOCROOT		"/htdocs"
+#define HTTPD_INDEX		"index.html"
 #define FD_RESERVE		5
 
 #define SERVER_MAX_CLIENTS	1024
@@ -72,7 +74,7 @@ enum httpchunk {
 	TOREAD_HTTP_NONE		= -5
 };
 
-#if DEBUG > 1
+#if DEBUG
 #define DPRINTF		log_debug
 #else
 #define DPRINTF(x...)	do {} while(0)
@@ -265,10 +267,11 @@ struct client {
 	struct bufferevent	*clt_file;
 
 	off_t			 clt_toread;
+	size_t			 clt_headerlen;
 	int			 clt_persist;
 	int			 clt_line;
-	size_t			 clt_headerlen;
 	int			 clt_done;
+	int			 clt_inflight;
 
 	struct evbuffer		*clt_log;
 	struct timeval		 clt_timeout;
@@ -341,8 +344,6 @@ struct httpd {
 #define HTTPD_OPT_LOGNOTIFY		0x10
 #define HTTPD_OPT_LOGALL		0x18
 
-extern volatile int server_inflight;
-
 /* control.c */
 int	 control_init(struct privsep *, struct control_sock *);
 int	 control_listen(struct control_sock *);
@@ -363,6 +364,7 @@ int	 cmdline_symset(char *);
 /* server.c */
 pid_t	 server(struct privsep *, struct privsep_proc *);
 int	 server_privinit(struct server *);
+void	 server_purge(struct server *);
 int	 server_socket_af(struct sockaddr_storage *, in_port_t);
 in_port_t
 	 server_socket_getport(struct sockaddr_storage *);
@@ -379,6 +381,7 @@ int	 server_bufferevent_write_chunk(struct client *,
 	    struct evbuffer *, size_t);
 int	 server_bufferevent_add(struct event *, int);
 int	 server_bufferevent_write(struct client *, void *, size_t);
+void	 server_inflight_dec(struct client *, const char *);
 
 SPLAY_PROTOTYPE(client_tree, client, clt_nodes, server_client_cmp);
 
@@ -400,7 +403,7 @@ int	 server_writeheader_http(struct client *);
 int	 server_writeresponse_http(struct client *);
 int	 server_response_http(struct client *, u_int, struct media_type *,
 	    size_t);
-void	 server_reset_http(struct client *, int);
+void	 server_reset_http(struct client *);
 void	 server_close_http(struct client *);
 int	 server_response(struct httpd *, struct client *);
 
@@ -412,6 +415,7 @@ void		 event_again(struct event *, int, short,
 		    void (*)(int, short, void *),
 		    struct timeval *, struct timeval *, void *);
 const char	*canonicalize_host(const char *, char *, size_t);
+const char	*canonicalize_path(const char *, const char *, char *, size_t);
 void		 imsg_event_add(struct imsgev *);
 int		 imsg_compose_event(struct imsgev *, u_int16_t, u_int32_t,
 		    pid_t, int, void *, u_int16_t);

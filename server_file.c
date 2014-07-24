@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_file.c,v 1.4 2014/07/14 00:19:48 reyk Exp $	*/
+/*	$OpenBSD: server_file.c,v 1.10 2014/07/23 22:20:37 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -46,6 +46,75 @@
 #include "httpd.h"
 #include "http.h"
 
+int	 server_file_access(struct http_descriptor *, char *, size_t,
+	    struct stat *);
+void	 server_file_error(struct bufferevent *, short, void *);
+
+int
+server_file_access(struct http_descriptor *desc, char *path, size_t len,
+    struct stat *st)
+{
+	errno = 0;
+	if (access(path, R_OK) == -1) {
+		goto fail;
+	} else if (stat(path, st) == -1) {
+		goto fail;
+	} else if (S_ISDIR(st->st_mode)) {
+		/* XXX Should we support directory listing? */
+
+		if (!len) {
+			/* Recursion - the index "file" is a directory? */
+			errno = EINVAL;
+			goto fail;
+		}
+
+		/* Redirect to path with trailing "/" */
+		if (path[strlen(path) - 1] != '/') {
+			/* Remove the document root to get the relative URL */
+			if (canonicalize_path(NULL,
+			    desc->http_path, path, len) == NULL ||
+			    strlcat(path, "/", len) >= len) {
+				errno = EINVAL;
+				goto fail;
+			}
+
+			/* Indicate that the file has been moved */
+			return (301);
+		}
+
+		/* Otherwise append the default index file */
+		if (strlcat(path, HTTPD_INDEX, len) >= len) {
+			errno = EACCES;
+			goto fail;
+		}
+
+		/* Check again but set len to 0 to avoid recursion */
+		return (server_file_access(desc, path, 0, st));
+	} else if (!S_ISREG(st->st_mode)) {
+		/* Don't follow symlinks and ignore special files */
+		errno = EACCES;
+		goto fail;
+	}
+
+	return (0);
+
+ fail:
+	/* Remove the document root */
+	if (len && canonicalize_path(NULL, desc->http_path, path, len) == NULL)
+		return (500);
+
+	switch (errno) {
+	case ENOENT:
+		return (404);
+	case EACCES:
+		return (403);
+	default:
+		return (500);
+	}
+
+	/* NOTREACHED */
+}
+
 int
 server_file(struct httpd *env, struct client *clt)
 {
@@ -57,57 +126,25 @@ server_file(struct httpd *env, struct client *clt)
 	char			 path[MAXPATHLEN];
 	struct stat		 st;
 
-	/* 
-	 * XXX This is not ready XXX
-	 * XXX Don't expect anything from this code yet,
-	 */
-
-	strlcpy(path, "/htdocs", sizeof(path));
-	if (desc->http_path[0] != '/')
-		strlcat(path, "/", sizeof(path));
-	strlcat(path, desc->http_path, sizeof(path));
-	if (desc->http_path[strlen(desc->http_path) - 1] == '/')
-		strlcat(path, "index.html", sizeof(path));
-
-	if (access(path, R_OK) == -1) {
-		switch (errno) {
-		case EACCES:
-			server_abort_http(clt, 403, path);
-			break;
-		case ENOENT:
-			server_abort_http(clt, 404, path);
-			break;
-		default:
-			server_abort_http(clt, 500, path);
-			break;
-		}
+	if (canonicalize_path(HTTPD_DOCROOT,
+	    desc->http_path, path, sizeof(path)) == NULL) {
+		/* Do not echo the uncanonicalized path */
+		server_abort_http(clt, 500, "invalid request path");
 		return (-1);
 	}
 
-	if ((fd = open(path, O_RDONLY)) == -1) {
-		/*
-		 * Pause accept if we are out of file descriptors, or
-		 * libevent will haunt us here too.
-		 */
-		if (errno == ENFILE || errno == EMFILE) {
-			struct timeval evtpause = { 1, 0 };
-
-			event_del(&srv->srv_ev);
-			evtimer_add(&srv->srv_evt, &evtpause);
-			log_debug("%s: deferring connections", __func__);
-			return (0);
-		}
+	/* Returns HTTP status code on error */
+	if ((ret = server_file_access(desc, path, sizeof(path), &st)) != 0) {
+		server_abort_http(clt, ret, path);
+		return (-1);
 	}
 
-	if (clt->clt_persist <= 1) {
-		server_inflight--;
-		DPRINTF("%s: inflight decremented, now %d",
-		    __func__, server_inflight);
-		event_add(&srv->srv_ev, NULL);
-	}
-
-	if (fstat(fd, &st) == -1)
+	/* Now open the file, should be readable or we have another problem */
+	if ((fd = open(path, O_RDONLY)) == -1)
 		goto fail;
+
+	/* File descriptor is opened, decrement inflight counter */
+	server_inflight_dec(clt, __func__);
 
 	media = media_find(env->sc_mediatypes, path);
 	ret = server_response_http(clt, 200, media, st.st_size);
@@ -125,8 +162,9 @@ server_file(struct httpd *env, struct client *clt)
 	clt->clt_fd = fd;
 	if (clt->clt_file != NULL)
 		bufferevent_free(clt->clt_file);
+
 	clt->clt_file = bufferevent_new(clt->clt_fd, server_read,
-	    server_write, server_error, clt);
+	    server_write, server_file_error, clt);
 	if (clt->clt_file == NULL) {
 		errstr = "failed to allocate file buffer event";
 		goto fail;
@@ -134,7 +172,8 @@ server_file(struct httpd *env, struct client *clt)
 
 	bufferevent_settimeout(clt->clt_file,
 	    srv->srv_conf.timeout.tv_sec, srv->srv_conf.timeout.tv_sec);
-	bufferevent_enable(clt->clt_file, EV_READ|EV_WRITE);
+	bufferevent_enable(clt->clt_file, EV_READ);
+	bufferevent_disable(clt->clt_bev, EV_READ);
 
 	return (0);
  fail:
@@ -142,4 +181,47 @@ server_file(struct httpd *env, struct client *clt)
 		errstr = strerror(errno);
 	server_abort_http(clt, 500, errstr);
 	return (-1);
+}
+
+void
+server_file_error(struct bufferevent *bev, short error, void *arg)
+{
+	struct client		*clt = arg;
+	struct evbuffer		*dst;
+
+	if (error & EVBUFFER_TIMEOUT) {
+		server_close(clt, "buffer event timeout");
+		return;
+	}
+	if (error & (EVBUFFER_READ|EVBUFFER_WRITE|EVBUFFER_EOF)) {
+		bufferevent_disable(bev, EV_READ);
+
+		clt->clt_done = 1;
+
+		dst = EVBUFFER_OUTPUT(clt->clt_bev);
+		if (EVBUFFER_LENGTH(dst)) {
+			/* Finish writing all data first */
+			bufferevent_enable(clt->clt_bev, EV_WRITE);
+			return;
+		}
+
+		if (clt->clt_persist) {
+			/* Close input file and wait for next HTTP request */
+			if (clt->clt_fd != -1)
+				close(clt->clt_fd);
+			clt->clt_fd = -1;
+			clt->clt_toread = TOREAD_HTTP_HEADER;
+			server_reset_http(clt);
+			bufferevent_enable(clt->clt_bev, EV_READ|EV_WRITE);
+			return;
+		}
+		server_close(clt, "done");
+		return;
+	}
+	if (error & EVBUFFER_ERROR && errno == EFBIG) {
+		bufferevent_enable(bev, EV_READ);
+		return;
+	}
+	server_close(clt, "buffer event error");
+	return;
 }

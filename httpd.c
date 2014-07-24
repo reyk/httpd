@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.2 2014/07/13 14:17:37 reyk Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.6 2014/07/23 23:10:27 reyk Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -465,6 +465,70 @@ canonicalize_host(const char *host, char *name, size_t len)
 	return (NULL);
 }
 
+const char *
+canonicalize_path(const char *root, const char *input, char *path, size_t len)
+{
+	const char	*i;
+	char		*p, *start, *end;
+	size_t		 n;
+
+	/* assuming input starts with '/' and is nul-terminated */
+	i = input;
+	p = path;
+
+	/* prepend root directory, if specified */
+	if (root != NULL) {
+		if ((n = strlcpy(path, root, len)) >= len)
+			return (NULL);
+		len -= n;
+		p += n;
+	}
+
+	if (*input != '/' || len < 3)
+		return (NULL);
+
+	start = p;
+	end = p + (len - 1);
+
+	while (*i != '\0') {
+		/* Detect truncation */
+		if (p >= end)
+			return (NULL);
+
+		/* 1. check for special path elements */
+		if (i[0] == '/') {
+			if (i[1] == '/') {
+				/* a) skip repeating '//' slashes */
+				while (i[1] == '/')
+					i++;
+				continue;
+			} else if (i[1] == '.' && i[2] == '.' && 
+			    (i[3] == '/' || i[3] == '\0')) {
+				/* b) revert '..' to previous directory */
+				i += 3;
+				while (p > start && *p != '/')
+					p--;
+				*p = '\0';
+				continue;
+			} else if (i[1] == '.' &&
+			    (i[2] == '/' || i[2] == '\0')) {
+				/* c) skip unnecessary '.' current dir */
+				i += 2;
+				continue;
+			}
+		}
+
+		/* 2. copy any other characters */
+		*p++ = *i;
+		i++;
+	}
+	if (p == start)
+		*p++ = '/';
+	*p++ = '\0';
+
+	return (path);
+}
+
 void
 socket_rlimit(int maxfd)
 {
@@ -757,6 +821,11 @@ media_add(struct mediatypes *types, struct media_type *media)
 		return (NULL);
 
 	memcpy(entry, media, sizeof(*entry));
+	if (media->media_encoding != NULL &&
+	    (entry->media_encoding = strdup(media->media_encoding)) == NULL) {
+		free(entry);
+		return (NULL);
+	}
 	RB_INSERT(mediatypes, types, entry);
 
 	return (entry);

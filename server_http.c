@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.7 2014/07/14 09:03:08 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.10 2014/07/23 21:43:12 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -319,9 +319,8 @@ server_read_http(struct bufferevent *bev, void *arg)
 
  done:
 		if (clt->clt_toread <= 0) {
-			if (server_response(env, clt) == -1)
-				return;
-			server_reset_http(clt, 0);
+			server_response(env, clt);
+			return;
 		}
 	}
 	if (clt->clt_done) {
@@ -502,31 +501,17 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 }
 
 void
-server_reset_http(struct client *clt, int all)
+server_reset_http(struct client *clt)
 {
 	struct http_descriptor	*desc = clt->clt_desc;
-
-	log_debug("%s: method %s done %d count %d fd %d p %d", __func__,
-	    server_httpmethod_byid(desc->http_method), all,
-	    getdtablecount(), clt->clt_fd, clt->clt_persist);
 
 	server_httpdesc_free(desc);
 	desc->http_method = 0;
 	desc->http_chunked = 0;
-	desc->http_lastheader = NULL;
 	clt->clt_headerlen = 0;
 	clt->clt_line = 0;
 	clt->clt_done = 0;
-
-	if (!all)
-		return;
-
-	clt->clt_toread = TOREAD_HTTP_HEADER;
 	clt->clt_bev->readcb = server_read_http;
-	if (clt->clt_fd != -1) {
-		close(clt->clt_fd);
-		clt->clt_fd = -1;
-	}
 }
 
 void
@@ -535,7 +520,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	struct server		*srv = clt->clt_server;
 	struct bufferevent	*bev = clt->clt_bev;
 	const char		*httperr = NULL, *text = "";
-	char			*httpmsg;
+	char			*httpmsg, *extraheader = NULL;
 	time_t			 t;
 	struct tm		*lt;
 	char			 tmbuf[32], hbuf[128];
@@ -559,8 +544,21 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 		tmbuf[strlen(tmbuf) - 1] = '\0';	/* skip final '\n' */
 
 	/* Do not send details of the Internal Server Error */
-	if (code != 500)
+	switch (code) {
+	case 500:
+		/* Do not send details of the Internal Server Error */
+		break;
+	case 301:
+	case 302:
+		if (asprintf(&extraheader, "Location: %s\r\n", msg) == -1) {
+			code = 500;
+			extraheader = NULL;
+		}
+		break;
+	default:
 		text = msg;
+		break;
+	}
 
 	/* A CSS stylesheet allows minimal customization by the user */
 	style = "body { background-color: white; color: black; font-family: "
@@ -579,6 +577,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	    "Server: %s\r\n"
 	    "Connection: close\r\n"
 	    "Content-Type: text/html\r\n"
+	    "%s"
 	    "\r\n"
 	    "<!DOCTYPE HTML PUBLIC "
 	    "\"-//W3C//DTD HTML 4.01 Transitional//EN\">\n"
@@ -594,6 +593,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	    "</body>\n"
 	    "</html>\n",
 	    code, httperr, tmbuf, HTTPD_SERVERNAME,
+	    extraheader == NULL ? "" : extraheader,
 	    code, httperr, style, httperr, text,
 	    HTTPD_SERVERNAME, hbuf, ntohs(srv->srv_conf.port)) == -1)
 		goto done;
@@ -603,6 +603,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	free(httpmsg);
 
  done:
+	free(extraheader);
 	if (asprintf(&httpmsg, "%s (%03d %s)", msg, code, httperr) == -1)
 		server_close(clt, msg);
 	else {
@@ -658,7 +659,9 @@ server_response(struct httpd *httpd, struct client *clt)
 	if ((ret = server_file(httpd, clt)) == -1)
 		return (-1);
 
-	return (ret);
+	server_reset_http(clt);
+
+	return (0);
  fail:
 	server_abort_http(clt, 400, "bad request");
 	return (-1);
@@ -800,10 +803,6 @@ server_httpmethod_byname(const char *name)
 	/* Set up key */
 	method.method_name = name;
 
-	/*
-	 * RFC 2616 section 5.1.1 says that the method is case
-	 * sensitive so we don't do a strcasecmp here.
-	 */
 	if ((res = bsearch(&method, http_methods,
 	    sizeof(http_methods) / sizeof(http_methods[0]) - 1,
 	    sizeof(http_methods[0]), server_httpmethod_cmp)) != NULL)
@@ -833,6 +832,11 @@ server_httpmethod_cmp(const void *a, const void *b)
 {
 	const struct http_method *ma = a;
 	const struct http_method *mb = b;
+
+	/*
+	 * RFC 2616 section 5.1.1 says that the method is case
+	 * sensitive so we don't do a strcasecmp here.
+	 */
 	return (strcmp(ma->method_name, mb->method_name));
 }
 

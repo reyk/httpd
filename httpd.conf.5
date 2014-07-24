@@ -1,4 +1,4 @@
-.\"	$OpenBSD: httpd.conf.5,v 1.2 2014/07/13 14:17:37 reyk Exp $
+.\"	$OpenBSD: httpd.conf.5,v 1.5 2014/07/22 19:03:21 jmc Exp $
 .\"
 .\" Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: July 13 2014 $
+.Dd $Mdocdate: July 22 2014 $
 .Dt HTTPD.CONF 5
 .Os
 .Sh NAME
@@ -121,7 +121,7 @@ Configure the supported media types.
 .Nm httpd
 will set the
 .Ar Content-Type
-of the response header based on the file extension that is listed in the
+of the response header based on the file extension listed in the
 .Ic types
 section.
 If not specified,
@@ -140,7 +140,7 @@ The
 .Ic types
 section must include one or more lines of the following syntax:
 .Bl -tag -width Ds
-.It Ar type/subtype Ar name Oo Ar name ... Oc Ic ;
+.It Ar type/subtype Ar name Op Ar name ... ;
 Set the media
 .Ar type
 and
@@ -149,7 +149,7 @@ to the specified extension
 .Ar name .
 One or more names can be specified per line.
 .El
-.Sh EAMPLES
+.Sh EXAMPLES
 The following example will start two pre-forked servers that are
 listening on the primary IP address of the network interface that is a
 member of the
@@ -165,7 +165,7 @@ server "default" {
 
 types {
 	text/css			css;
-	text/html			html html;
+	text/html			htm html;
 	text/txt			txt;
 	image/gif			gif;
 	image/jpeg			jpg jpeg;
@@ -175,16 +175,16 @@ types {
 }
 .Ed
 .Pp
-The syntax of the types section is compatible to the format that is used by
+The syntax of the types section is compatible with the format used by
 .Xr nginx 8 ,
-so you can optionally include its
+so it is possible to include its
 .Pa mime.types
 file directly:
 .Bd -literal -offset indent
 include "/etc/nginx/mime.types"
 .Ed
 .Sh SEE ALSO
-.Xr httpd 8 .
+.Xr httpd 8
 .Sh AUTHORS
 .An -nosplit
 The
