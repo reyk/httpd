@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.7 2014/07/23 13:26:39 reyk Exp $	*/
+/*	$OpenBSD: server.c,v 1.11 2014/07/25 16:23:19 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -151,7 +151,8 @@ server_launch(void)
 void
 server_purge(struct server *srv)
 {
-	struct client	*clt;
+	struct client		*clt;
+	struct server_config	*srv_conf;
 
 	/* shutdown and remove server */
 	if (event_initialized(&srv->srv_ev))
@@ -167,7 +168,31 @@ server_purge(struct server *srv)
 	    SPLAY_ROOT(&srv->srv_clients)) != NULL)
 		server_close(clt, NULL);
 
+	/* cleanup hosts */
+	while ((srv_conf =
+	    TAILQ_FIRST(&srv->srv_hosts)) != NULL) {
+		TAILQ_REMOVE(&srv->srv_hosts, srv_conf, entry);
+
+		/* It might point to our own "default" entry */
+		if (srv_conf != &srv->srv_conf)
+			free(srv_conf);
+	}
+
 	free(srv);
+}
+
+struct server *
+server_byaddr(struct sockaddr *addr)
+{
+	struct server	*srv;
+
+	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
+		if (sockaddr_cmp((struct sockaddr *)&srv->srv_conf.ss,
+		    addr, srv->srv_conf.prefixlen) == 0)
+			return (srv);
+	}
+
+	return (NULL);
 }
 
 int
@@ -316,9 +341,9 @@ server_socket_listen(struct sockaddr_storage *ss, in_port_t port,
 void
 server_input(struct client *clt)
 {
-	struct server	*srv = clt->clt_server;
-	evbuffercb	 inrd = server_read;
-	evbuffercb	 inwr = server_write;
+	struct server_config	*srv_conf = clt->clt_srv_conf;
+	evbuffercb		 inrd = server_read;
+	evbuffercb		 inwr = server_write;
 
 	if (server_httpdesc_init(clt) == -1) {
 		server_close(clt,
@@ -340,7 +365,7 @@ server_input(struct client *clt)
 	}
 
 	bufferevent_settimeout(clt->clt_bev,
-	    srv->srv_conf.timeout.tv_sec, srv->srv_conf.timeout.tv_sec);
+	    srv_conf->timeout.tv_sec, srv_conf->timeout.tv_sec);
 	bufferevent_enable(clt->clt_bev, EV_READ|EV_WRITE);
 }
 
@@ -472,9 +497,10 @@ server_accept(int fd, short event, void *arg)
 	clt->clt_s = s;
 	clt->clt_fd = -1;
 	clt->clt_toread = TOREAD_UNLIMITED;
-	clt->clt_server = srv;
+	clt->clt_srv = srv;
+	clt->clt_srv_conf = &srv->srv_conf;
 	clt->clt_id = ++server_cltid;
-	clt->clt_serverid = srv->srv_conf.id;
+	clt->clt_srv_id = srv->srv_conf.id;
 	clt->clt_pid = getpid();
 	clt->clt_inflight = 1;
 	switch (ss.ss_family) {
@@ -545,10 +571,14 @@ server_inflight_dec(struct client *clt, const char *why)
 void
 server_close(struct client *clt, const char *msg)
 {
-	char		 ibuf[128], obuf[128], *ptr = NULL;
-	struct server	*srv = clt->clt_server;
+	char			 ibuf[128], obuf[128], *ptr = NULL;
+	struct server		*srv = clt->clt_srv;
+	struct server_config	*srv_conf = clt->clt_srv_conf;
 
 	SPLAY_REMOVE(client_tree, &srv->srv_clients, clt);
+
+	/* free the HTTP descriptors incl. headers */
+	server_close_http(clt);
 
 	event_del(&clt->clt_ev);
 	if (clt->clt_bev != NULL)
@@ -560,13 +590,13 @@ server_close(struct client *clt, const char *msg)
 		memset(&ibuf, 0, sizeof(ibuf));
 		memset(&obuf, 0, sizeof(obuf));
 		(void)print_host(&clt->clt_ss, ibuf, sizeof(ibuf));
-		(void)print_host(&srv->srv_conf.ss, obuf, sizeof(obuf));
+		(void)print_host(&srv_conf->ss, obuf, sizeof(obuf));
 		if (EVBUFFER_LENGTH(clt->clt_log) &&
 		    evbuffer_add_printf(clt->clt_log, "\r\n") != -1)
 			ptr = evbuffer_readline(clt->clt_log);
 		log_info("server %s, "
 		    "client %d (%d active), %s -> %s:%d, "
-		    "%s%s%s", srv->srv_conf.name, clt->clt_id, server_clients,
+		    "%s%s%s", srv_conf->name, clt->clt_id, server_clients,
 		    ibuf, obuf, ntohs(clt->clt_port), msg,
 		    ptr == NULL ? "" : ",", ptr == NULL ? "" : ptr);
 		if (ptr != NULL)
@@ -575,7 +605,7 @@ server_close(struct client *clt, const char *msg)
 
 	if (clt->clt_bev != NULL)
 		bufferevent_free(clt->clt_bev);
-	else if (clt->clt_output != NULL)
+	if (clt->clt_output != NULL)
 		evbuffer_free(clt->clt_output);
 
 	if (clt->clt_file != NULL)

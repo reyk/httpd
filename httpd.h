@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.7 2014/07/23 19:03:56 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.12 2014/07/25 16:23:19 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -123,6 +123,7 @@ struct portrange {
 struct address {
 	struct sockaddr_storage	 ss;
 	int			 ipproto;
+	int			 prefixlen;
 	struct portrange	 port;
 	char			 ifname[IFNAMSIZ];
 	TAILQ_ENTRY(address)	 entry;
@@ -252,8 +253,9 @@ struct privsep_proc {
 struct client {
 	u_int32_t		 clt_id;
 	pid_t			 clt_pid;
-	void			*clt_server;
-	u_int32_t		 clt_serverid;
+	void			*clt_srv;
+	void			*clt_srv_conf;
+	u_int32_t		 clt_srv_id;
 
 	int			 clt_s;
 	in_port_t		 clt_port;
@@ -287,14 +289,20 @@ struct server_config {
 	u_int32_t		 id;
 	u_int32_t		 flags;
 	char			 name[MAXHOSTNAMELEN];
+	char			 docroot[MAXPATHLEN];
 	in_port_t		 port;
 	struct sockaddr_storage	 ss;
+	int			 prefixlen;
 	struct timeval		 timeout;
+
+	TAILQ_ENTRY(server_config) entry;
 };
+TAILQ_HEAD(serverhosts, server_config);
 
 struct server {
 	TAILQ_ENTRY(server)	 srv_entry;
 	struct server_config	 srv_conf;
+	struct serverhosts	 srv_hosts;
 
 	u_int8_t		 srv_tcpflags;
 	int			 srv_tcpbufsiz;
@@ -303,10 +311,6 @@ struct server {
 	u_int8_t		 srv_tcpipminttl;
 
 	int			 srv_s;
-	struct bufferevent	*srv_bev;
-	int			 srv_dsts;
-	struct bufferevent	*srv_dstbev;
-
 	struct event		 srv_ev;
 	struct event		 srv_evt;
 
@@ -382,6 +386,8 @@ int	 server_bufferevent_write_chunk(struct client *,
 int	 server_bufferevent_add(struct event *, int);
 int	 server_bufferevent_write(struct client *, void *, size_t);
 void	 server_inflight_dec(struct client *, const char *);
+struct server *
+	 server_byaddr(struct sockaddr *);
 
 SPLAY_PROTOTYPE(client_tree, client, clt_nodes, server_client_cmp);
 
@@ -422,6 +428,9 @@ int		 imsg_compose_event(struct imsgev *, u_int16_t, u_int32_t,
 void		 socket_rlimit(int);
 char		*get_string(u_int8_t *, size_t);
 void		*get_data(u_int8_t *, size_t);
+int		 sockaddr_cmp(struct sockaddr *, struct sockaddr *, int);
+struct in6_addr *prefixlen2mask6(u_int8_t, u_int32_t *);
+u_int32_t	 prefixlen2mask(u_int8_t);
 int		 accept_reserve(int, struct sockaddr *, socklen_t *, int,
 		     volatile int *);
 struct kv	*kv_add(struct kvtree *, char *, char *);

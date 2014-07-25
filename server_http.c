@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.10 2014/07/23 21:43:12 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.14 2014/07/25 16:23:19 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -110,6 +110,7 @@ server_httpdesc_free(struct http_descriptor *desc)
 		desc->http_version = NULL;
 	}
 	kv_purge(&desc->http_headers);
+	desc->http_lastheader = NULL;
 }
 
 void
@@ -517,7 +518,7 @@ server_reset_http(struct client *clt)
 void
 server_abort_http(struct client *clt, u_int code, const char *msg)
 {
-	struct server		*srv = clt->clt_server;
+	struct server_config	*srv_conf = clt->clt_srv_conf;
 	struct bufferevent	*bev = clt->clt_bev;
 	const char		*httperr = NULL, *text = "";
 	char			*httpmsg, *extraheader = NULL;
@@ -533,7 +534,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 		goto done;
 
 	/* Some system information */
-	if (print_host(&srv->srv_conf.ss, hbuf, sizeof(hbuf)) == NULL)
+	if (print_host(&srv_conf->ss, hbuf, sizeof(hbuf)) == NULL)
 		goto done;
 
 	/* RFC 2616 "tolerates" asctime() */
@@ -595,7 +596,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	    code, httperr, tmbuf, HTTPD_SERVERNAME,
 	    extraheader == NULL ? "" : extraheader,
 	    code, httperr, style, httperr, text,
-	    HTTPD_SERVERNAME, hbuf, ntohs(srv->srv_conf.port)) == -1)
+	    HTTPD_SERVERNAME, hbuf, ntohs(srv_conf->port)) == -1)
 		goto done;
 
 	/* Dump the message without checking for success */
@@ -627,6 +628,8 @@ int
 server_response(struct httpd *httpd, struct client *clt)
 {
 	struct http_descriptor	*desc	= clt->clt_desc;
+	struct server		*srv = clt->clt_srv;
+	struct server_config	*srv_conf;
 	struct kv		*kv, key;
 	int			 ret;
 
@@ -654,6 +657,23 @@ server_response(struct httpd *httpd, struct client *clt)
 			clt->clt_persist++;
 		else
 			clt->clt_persist = 0;
+	}
+
+	/*
+	 * Do we have a Host header and matching configuration?
+	 * XXX the Host can also appear in the URL path.
+	 */
+	key.kv_key = "Host";
+	if ((kv = kv_find(&desc->http_headers, &key)) != NULL) {
+		/* XXX maybe better to turn srv_hosts into a tree */
+		TAILQ_FOREACH(srv_conf, &srv->srv_hosts, entry) {
+			if (fnmatch(srv_conf->name, kv->kv_value,
+			    FNM_CASEFOLD) == 0) {
+				/* Replace host configuration */
+				clt->clt_srv_conf = srv_conf;
+				break;
+			}
+		}
 	}
 
 	if ((ret = server_file(httpd, clt)) == -1)
