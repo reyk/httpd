@@ -466,23 +466,14 @@ canonicalize_host(const char *host, char *name, size_t len)
 }
 
 const char *
-canonicalize_path(const char *root, const char *input, char *path, size_t len)
+canonicalize_path(const char *input, char *path, size_t len)
 {
 	const char	*i;
 	char		*p, *start, *end;
-	size_t		 n;
 
 	/* assuming input starts with '/' and is nul-terminated */
 	i = input;
 	p = path;
-
-	/* prepend root directory, if specified */
-	if (root != NULL) {
-		if ((n = strlcpy(path, root, len)) >= len)
-			return (NULL);
-		len -= n;
-		p += n;
-	}
 
 	if (*input != '/' || len < 3)
 		return (NULL);

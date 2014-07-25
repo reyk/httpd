@@ -421,7 +421,7 @@ void		 event_again(struct event *, int, short,
 		    void (*)(int, short, void *),
 		    struct timeval *, struct timeval *, void *);
 const char	*canonicalize_host(const char *, char *, size_t);
-const char	*canonicalize_path(const char *, const char *, char *, size_t);
+const char	*canonicalize_path(const char *, char *, size_t);
 void		 imsg_event_add(struct imsgev *);
 int		 imsg_compose_event(struct imsgev *, u_int16_t, u_int32_t,
 		    pid_t, int, void *, u_int16_t);

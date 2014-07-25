@@ -627,13 +627,19 @@ server_close_http(struct client *clt)
 int
 server_response(struct httpd *httpd, struct client *clt)
 {
+	char			 path[MAXPATHLEN];
 	struct http_descriptor	*desc	= clt->clt_desc;
 	struct server		*srv = clt->clt_srv;
 	struct server_config	*srv_conf;
 	struct kv		*kv, key;
 	int			 ret;
 
-	if (desc->http_path == NULL)
+	/* Canonicalize the request path */
+	if (desc->http_path == NULL ||
+	    canonicalize_path(desc->http_path, path, sizeof(path)) == NULL)
+		goto fail;
+	free(desc->http_path);
+	if ((desc->http_path = strdup(path)) == NULL)
 		goto fail;
 
 	if (strcmp(desc->http_version, "HTTP/1.1") == 0) {
