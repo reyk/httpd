@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_file.c,v 1.14 2014/07/25 20:13:06 reyk Exp $	*/
+/*	$OpenBSD: server_file.c,v 1.16 2014/07/25 23:23:39 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -38,6 +38,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <dirent.h>
 #include <err.h>
 #include <event.h>
 
@@ -54,7 +55,9 @@ int
 server_file_access(struct http_descriptor *desc, char *path, size_t len,
     struct stat *st)
 {
-	char	*newpath;
+	struct stat	 stb;
+	char		*newpath;
+
 	errno = 0;
 
 	if (access(path, R_OK) == -1) {
@@ -72,7 +75,8 @@ server_file_access(struct http_descriptor *desc, char *path, size_t len,
 
 		/* Redirect to path with trailing "/" */
 		if (path[strlen(path) - 1] != '/') {
-			if (asprintf(&newpath, "%s/", desc->http_path) == -1)
+			if (asprintf(&newpath, "http://%s%s/",
+			    desc->http_host, desc->http_path) == -1)
 				return (500);
 			free(desc->http_path);
 			desc->http_path = newpath;
@@ -88,7 +92,15 @@ server_file_access(struct http_descriptor *desc, char *path, size_t len,
 		}
 
 		/* Check again but set len to 0 to avoid recursion */
-		return (server_file_access(desc, path, 0, st));
+		if (server_file_access(desc, path, 0, &stb) == 404) {
+			/*
+			 * Index file not found, return success but
+			 * indicate directory with S_ISDIR.
+			 */
+		} else {
+			/* return updated stat from index file */
+			memcpy(st, &stb, sizeof(*st));
+		}
 	} else if (!S_ISREG(st->st_mode)) {
 		/* Don't follow symlinks and ignore special files */
 		errno = EACCES;
@@ -110,19 +122,131 @@ server_file_access(struct http_descriptor *desc, char *path, size_t len,
 	/* NOTREACHED */
 }
 
+static int
+server_file_index(struct httpd *env, struct client *clt)
+{
+	char			  path[MAXPATHLEN];
+	struct http_descriptor	 *desc = clt->clt_desc;
+	struct server_config	 *srv_conf = clt->clt_srv_conf;
+	struct dirent		**namelist, *dp;
+	int			  namesize, i, ret, fd = -1, width;
+	struct evbuffer		 *evb = NULL;
+	struct media_type	 *media;
+	const char		 *style;
+	struct stat		  st;
+
+	/* Request path is already canonicalized */
+	if ((size_t)snprintf(path, sizeof(path), "%s%s",
+	    srv_conf->docroot, desc->http_path) >= sizeof(path))
+		goto fail;
+
+	/* Now open the file, should be readable or we have another problem */
+	if ((fd = open(path, O_RDONLY)) == -1)
+		goto fail;
+
+	/* File descriptor is opened, decrement inflight counter */
+	server_inflight_dec(clt, __func__);
+
+	if ((evb = evbuffer_new()) == NULL)
+		goto fail;
+
+	if ((namesize = scandir(path, &namelist, NULL, alphasort)) == -1)
+		goto fail;
+
+	/* A CSS stylesheet allows minimal customization by the user */
+	style = "body { background-color: white; color: black; font-family: "
+	    "sans-serif; }";
+	/* Generate simple HTML index document */
+	evbuffer_add_printf(evb,
+	    "<!DOCTYPE HTML PUBLIC "
+	    "\"-//W3C//DTD HTML 4.01 Transitional//EN\">\n"
+	    "<html>\n"
+	    "<head>\n"
+	    "<title>Index of %s</title>\n"
+	    "<style type=\"text/css\"><!--\n%s\n--></style>\n"
+	    "</head>\n"
+	    "<body>\n"
+	    "<h1>Index of %s</h1>\n"
+	    "<hr>\n<pre>\n",
+	    desc->http_path, style, desc->http_path);
+
+	for (i = 0; i < namesize; i++) {
+		dp = namelist[i];
+		if (dp->d_name[0] == '.' && dp->d_name[1] == '\0') {
+			/* ignore */
+		} else if (dp->d_type == DT_DIR) {
+			evbuffer_add_printf(evb,
+			    "<a href=\"%s/\">%s/</a>\n",
+			    dp->d_name, dp->d_name);
+		} else if (dp->d_type == DT_REG) {
+			if (fstatat(fd, dp->d_name, &st, 0) == -1) {
+				free(dp);
+				continue;
+			}
+			
+			width = 50 - strlen(dp->d_name);
+			evbuffer_add_printf(evb,
+			    "<a href=\"%s\">%s</a>%*s%llu bytes\n",
+			    dp->d_name, dp->d_name,
+			    width < 0 ? 50 : width, "", st.st_size);
+		}
+		free(dp);
+	}
+	free(namelist);
+
+	evbuffer_add_printf(evb,
+	    "</pre>\n<hr>\n</body>\n</html>\n");
+
+	close(fd);
+
+	media = media_find(env->sc_mediatypes, "index.html");
+	ret = server_response_http(clt, 200, media, EVBUFFER_LENGTH(evb));
+	switch (ret) {
+	case -1:
+		goto fail;
+	case 0:
+		/* Connection is already finished */
+		evbuffer_free(evb);
+		return (0);
+	default:
+		break;
+	}
+
+	if (server_bufferevent_write_buffer(clt, evb) == -1)
+		goto fail;
+	evbuffer_free(evb);
+
+	bufferevent_enable(clt->clt_bev, EV_READ|EV_WRITE);
+	if (clt->clt_persist)
+		clt->clt_toread = TOREAD_HTTP_HEADER;
+	else
+		clt->clt_toread = TOREAD_HTTP_NONE;
+	clt->clt_done = 0;
+
+	return (0);
+
+ fail:
+	if (fd != -1)
+		close(fd);
+	if (evb != NULL)
+		evbuffer_free(evb);
+	server_abort_http(clt, 500, desc->http_path);
+	return (-1);
+}
+
 int
 server_file(struct httpd *env, struct client *clt)
 {
+	char			 path[MAXPATHLEN];
 	struct http_descriptor	*desc = clt->clt_desc;
 	struct server_config	*srv_conf = clt->clt_srv_conf;
 	struct media_type	*media;
 	const char		*errstr = NULL;
 	int			 fd = -1, ret;
-	char			 path[MAXPATHLEN];
 	struct stat		 st;
 
 	/* Request path is already canonicalized */
-	if ((size_t)snprintf(path, sizeof(path), "%s/%s",
+	if ((size_t)snprintf(path, sizeof(path), "%s%s",
 	    srv_conf->docroot, desc->http_path) >= sizeof(path)) {
 		/* Do not echo the uncanonicalized path */
 		server_abort_http(clt, 500, desc->http_path);
@@ -133,6 +257,11 @@ server_file(struct httpd *env, struct client *clt)
 	if ((ret = server_file_access(desc, path, sizeof(path), &st)) != 0) {
 		server_abort_http(clt, ret, desc->http_path);
 		return (-1);
+	}
+
+	if (S_ISDIR(st.st_mode)) {
+		/* list directory index */
+		return (server_file_index(env, clt));
 	}
 
 	/* Now open the file, should be readable or we have another problem */

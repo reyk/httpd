@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.14 2014/07/25 16:23:19 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.19 2014/07/25 23:25:38 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -48,6 +48,7 @@
 #include "httpd.h"
 #include "http.h"
 
+static void	 server_http_date(char *, size_t);
 static int	 server_httpmethod_cmp(const void *, const void *);
 static int	 server_httperror_cmp(const void *, const void *);
 void		 server_httpdesc_free(struct http_descriptor *);
@@ -505,6 +506,7 @@ void
 server_reset_http(struct client *clt)
 {
 	struct http_descriptor	*desc = clt->clt_desc;
+	struct server		*srv = clt->clt_srv;
 
 	server_httpdesc_free(desc);
 	desc->http_method = 0;
@@ -513,6 +515,51 @@ server_reset_http(struct client *clt)
 	clt->clt_line = 0;
 	clt->clt_done = 0;
 	clt->clt_bev->readcb = server_read_http;
+	clt->clt_srv_conf = &srv->srv_conf;
+}
+
+static void
+server_http_date(char *tmbuf, size_t len)
+{
+	time_t			 t;
+	struct tm		 tm;
+
+	/* New HTTP/1.1 RFC 7231 prefers IMF-fixdate from RFC 5322 */
+	time(&t);
+	gmtime_r(&t, &tm);
+	strftime(tmbuf, len, "%a, %d %h %Y %T %Z", &tm);
+}
+
+const char *
+server_http_host(struct sockaddr_storage *ss, char *buf, size_t len)
+{
+	char		hbuf[MAXHOSTNAMELEN];
+	in_port_t	port;
+
+	if (print_host(ss, buf, len) == NULL)
+		return (NULL);
+
+	port = ntohs(server_socket_getport(ss));
+	if (port == HTTP_PORT)
+		return (buf);
+
+	switch (ss->ss_family) {
+	case AF_INET:
+		if ((size_t)snprintf(hbuf, sizeof(hbuf),
+		    "%s:%u", buf, port) >= sizeof(hbuf))
+			return (NULL);
+		break;
+	case AF_INET6:
+		if ((size_t)snprintf(hbuf, sizeof(hbuf),
+		    "[%s]:%u", buf, port) >= sizeof(hbuf))
+			return (NULL);
+		break;
+	}
+
+	if (strlcpy(buf, hbuf, len) >= len)
+		return (NULL);
+
+	return (buf);
 }
 
 void
@@ -522,8 +569,6 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	struct bufferevent	*bev = clt->clt_bev;
 	const char		*httperr = NULL, *text = "";
 	char			*httpmsg, *extraheader = NULL;
-	time_t			 t;
-	struct tm		*lt;
 	char			 tmbuf[32], hbuf[128];
 	const char		*style;
 
@@ -537,12 +582,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	if (print_host(&srv_conf->ss, hbuf, sizeof(hbuf)) == NULL)
 		goto done;
 
-	/* RFC 2616 "tolerates" asctime() */
-	time(&t);
-	lt = localtime(&t);
-	tmbuf[0] = '\0';
-	if (asctime_r(lt, tmbuf) != NULL)
-		tmbuf[strlen(tmbuf) - 1] = '\0';	/* skip final '\n' */
+	server_http_date(tmbuf, sizeof(tmbuf));
 
 	/* Do not send details of the Internal Server Error */
 	switch (code) {
@@ -630,8 +670,8 @@ server_response(struct httpd *httpd, struct client *clt)
 	char			 path[MAXPATHLEN];
 	struct http_descriptor	*desc	= clt->clt_desc;
 	struct server		*srv = clt->clt_srv;
-	struct server_config	*srv_conf;
-	struct kv		*kv, key;
+	struct server_config	*srv_conf = &srv->srv_conf;
+	struct kv		*kv, key, *host;
 	int			 ret;
 
 	/* Canonicalize the request path */
@@ -642,10 +682,14 @@ server_response(struct httpd *httpd, struct client *clt)
 	if ((desc->http_path = strdup(path)) == NULL)
 		goto fail;
 
+	key.kv_key = "Host";
+	if ((host = kv_find(&desc->http_headers, &key)) != NULL &&
+	    host->kv_value == NULL)
+		host = NULL;
+
 	if (strcmp(desc->http_version, "HTTP/1.1") == 0) {
 		/* Host header is mandatory */
-		key.kv_key = "Host";
-		if ((kv = kv_find(&desc->http_headers, &key)) == NULL)
+		if (host == NULL)
 			goto fail;
 
 		/* Is the connection persistent? */
@@ -669,17 +713,29 @@ server_response(struct httpd *httpd, struct client *clt)
 	 * Do we have a Host header and matching configuration?
 	 * XXX the Host can also appear in the URL path.
 	 */
-	key.kv_key = "Host";
-	if ((kv = kv_find(&desc->http_headers, &key)) != NULL) {
+	if (host != NULL) {
 		/* XXX maybe better to turn srv_hosts into a tree */
 		TAILQ_FOREACH(srv_conf, &srv->srv_hosts, entry) {
-			if (fnmatch(srv_conf->name, kv->kv_value,
+			if (fnmatch(srv_conf->name, host->kv_value,
 			    FNM_CASEFOLD) == 0) {
 				/* Replace host configuration */
 				clt->clt_srv_conf = srv_conf;
+				srv_conf = NULL;
 				break;
 			}
 		}
+	}
+
+	if (srv_conf != NULL) {
+		/* Use the actual server IP address */
+		if (server_http_host(&clt->clt_srv_ss, desc->http_host,
+		    sizeof(desc->http_host)) == NULL)
+			goto fail;
+	} else {
+		/* Host header was valid and found */
+		if (strlcpy(desc->http_host, host->kv_value,
+		    sizeof(desc->http_host)) >= sizeof(desc->http_host))
+			goto fail;
 	}
 
 	if ((ret = server_file(httpd, clt)) == -1)
@@ -700,6 +756,7 @@ server_response_http(struct client *clt, u_int code,
 	struct http_descriptor	*desc = clt->clt_desc;
 	const char		*error;
 	struct kv		*ct, *cl;
+	char			 tmbuf[32];
 
 	if (desc == NULL || (error = server_httperror_byid(code)) == NULL)
 		return (-1);
@@ -734,6 +791,11 @@ server_response_http(struct client *clt, u_int code,
 	if (size && ((cl =
 	    kv_add(&desc->http_headers, "Content-Length", NULL)) == NULL ||
 	    kv_set(cl, "%ld", size) == -1))
+		return (-1);
+
+	/* Date header is mandatory and should be added last */
+	server_http_date(tmbuf, sizeof(tmbuf));
+	if (kv_add(&desc->http_headers, "Date", tmbuf) == NULL)
 		return (-1);
 
 	/* Write completed header */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.12 2014/07/25 16:23:19 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.15 2014/07/25 23:30:58 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -256,6 +256,7 @@ struct client {
 	void			*clt_srv;
 	void			*clt_srv_conf;
 	u_int32_t		 clt_srv_id;
+	struct sockaddr_storage	 clt_srv_ss;
 
 	int			 clt_s;
 	in_port_t		 clt_port;
@@ -387,7 +388,7 @@ int	 server_bufferevent_add(struct event *, int);
 int	 server_bufferevent_write(struct client *, void *, size_t);
 void	 server_inflight_dec(struct client *, const char *);
 struct server *
-	 server_byaddr(struct sockaddr *);
+	 server_byaddr(struct sockaddr *, in_port_t);
 
 SPLAY_PROTOTYPE(client_tree, client, clt_nodes, server_client_cmp);
 
@@ -412,6 +413,8 @@ int	 server_response_http(struct client *, u_int, struct media_type *,
 void	 server_reset_http(struct client *);
 void	 server_close_http(struct client *);
 int	 server_response(struct httpd *, struct client *);
+const char *
+	 server_http_host(struct sockaddr_storage *, char *, size_t);
 
 /* server_file.c */
 int	 server_file(struct httpd *, struct client *);
