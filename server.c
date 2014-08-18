@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.13 2014/07/25 23:30:58 reyk Exp $	*/
+/*	$OpenBSD: server.c,v 1.39 2014/08/06 18:38:11 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/uio.h>
 #include <sys/tree.h>
 #include <sys/hash.h>
 
@@ -36,30 +37,36 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <err.h>
 #include <pwd.h>
 #include <event.h>
 #include <fnmatch.h>
-
-#include <openssl/dh.h>
-#include <openssl/ssl.h>
+#include <ressl.h>
 
 #include "httpd.h"
 
 int		 server_dispatch_parent(int, struct privsep_proc *,
+		    struct imsg *);
+int		 server_dispatch_logger(int, struct privsep_proc *,
 		    struct imsg *);
 void		 server_shutdown(void);
 
 void		 server_init(struct privsep *, struct privsep_proc *p, void *);
 void		 server_launch(void);
 int		 server_socket(struct sockaddr_storage *, in_port_t,
-		    struct server *, int, int);
+		    struct server_config *, int, int);
 int		 server_socket_listen(struct sockaddr_storage *, in_port_t,
-		    struct server *);
+		    struct server_config *);
+
+int		 server_ssl_init(struct server *);
+void		 server_ssl_readcb(int, short, void *);
+void		 server_ssl_writecb(int, short, void *);
 
 void		 server_accept(int, short, void *);
+void		 server_accept_ssl(int, short, void *);
 void		 server_input(struct client *);
 
 extern void	 bufferevent_read_pressure_cb(struct evbuffer *, size_t,
@@ -73,7 +80,8 @@ static struct httpd		*env = NULL;
 int				 proc_id;
 
 static struct privsep_proc procs[] = {
-	{ "parent",	PROC_PARENT,	server_dispatch_parent }
+	{ "parent",	PROC_PARENT,	server_dispatch_parent },
+	{ "logger",	PROC_LOGGER,	server_dispatch_logger }
 };
 
 pid_t
@@ -96,11 +104,112 @@ server_shutdown(void)
 int
 server_privinit(struct server *srv)
 {
+	if (srv->srv_conf.flags & SRVFLAG_LOCATION)
+		return (0);
+
 	log_debug("%s: adding server %s", __func__, srv->srv_conf.name);
 
 	if ((srv->srv_s = server_socket_listen(&srv->srv_conf.ss,
-	    srv->srv_conf.port, srv)) == -1)
+	    srv->srv_conf.port, &srv->srv_conf)) == -1)
 		return (-1);
+
+	return (0);
+}
+
+static char *
+server_load_file(const char *filename, off_t *len)
+{
+	struct stat		 st;
+	off_t			 size;
+	char			*buf = NULL;
+	int			 fd;
+
+	if ((fd = open(filename, O_RDONLY)) == -1)
+		return (NULL);
+	if (fstat(fd, &st) != 0)
+		goto fail;
+	size = st.st_size;
+	if ((buf = calloc(1, size + 1)) == NULL)
+		goto fail;
+	if (read(fd, buf, size) != size)
+		goto fail;
+
+	close(fd);
+
+	*len = size;
+	return (buf);
+
+ fail:
+	free(buf);
+	close(fd);
+
+	return (NULL);
+}
+
+int
+server_ssl_load_keypair(struct server *srv)
+{
+	if ((srv->srv_conf.flags & SRVFLAG_SSL) == 0)
+		return (0);
+
+	if ((srv->srv_conf.ssl_cert = server_load_file(
+	    srv->srv_conf.ssl_cert_file, &srv->srv_conf.ssl_cert_len)) == NULL)
+		return (-1);
+	log_debug("%s: using certificate %s", __func__,
+	    srv->srv_conf.ssl_cert_file);
+
+	if ((srv->srv_conf.ssl_key = server_load_file(
+	    srv->srv_conf.ssl_key_file, &srv->srv_conf.ssl_key_len)) == NULL)
+		return (-1);
+	log_debug("%s: using private key %s", __func__,
+	    srv->srv_conf.ssl_key_file);
+
+	return (0);
+}
+
+int
+server_ssl_init(struct server *srv)
+{
+	if ((srv->srv_conf.flags & SRVFLAG_SSL) == 0)
+		return (0);
+
+	log_debug("%s: setting up SSL for %s", __func__, srv->srv_conf.name);
+
+	if (ressl_init() != 0) {
+		log_warn("%s: failed to initialise ressl", __func__);
+		return (-1);
+	}
+	if ((srv->srv_ressl_config = ressl_config_new()) == NULL) {
+		log_warn("%s: failed to get ressl config", __func__);
+		return (-1);
+	}
+	if ((srv->srv_ressl_ctx = ressl_server()) == NULL) {
+		log_warn("%s: failed to get ressl server", __func__);
+		return (-1);
+	}
+
+	ressl_config_set_ciphers(srv->srv_ressl_config,
+	    srv->srv_conf.ssl_ciphers);
+	ressl_config_set_cert_mem(srv->srv_ressl_config,
+	    srv->srv_conf.ssl_cert, srv->srv_conf.ssl_cert_len);
+	ressl_config_set_key_mem(srv->srv_ressl_config,
+	    srv->srv_conf.ssl_key, srv->srv_conf.ssl_key_len);
+
+	if (ressl_configure(srv->srv_ressl_ctx, srv->srv_ressl_config) != 0) {
+		log_warn("%s: failed to configure SSL - %s", __func__,
+		    ressl_error(srv->srv_ressl_ctx));
+		return (-1);
+	}
+
+	/* We're now done with the public/private key... */
+	explicit_bzero(srv->srv_conf.ssl_cert, srv->srv_conf.ssl_cert_len);
+	explicit_bzero(srv->srv_conf.ssl_key, srv->srv_conf.ssl_key_len);
+	free(srv->srv_conf.ssl_cert);
+	free(srv->srv_conf.ssl_key);
+	srv->srv_conf.ssl_cert = NULL;
+	srv->srv_conf.ssl_key = NULL;
+	srv->srv_conf.ssl_cert_len = 0;
+	srv->srv_conf.ssl_key_len = 0;
 
 	return (0);
 }
@@ -136,6 +245,7 @@ server_launch(void)
 	struct server		*srv;
 
 	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
+		server_ssl_init(srv);
 		server_http_init(srv);
 
 		log_debug("%s: running server %s", __func__,
@@ -174,9 +284,15 @@ server_purge(struct server *srv)
 		TAILQ_REMOVE(&srv->srv_hosts, srv_conf, entry);
 
 		/* It might point to our own "default" entry */
-		if (srv_conf != &srv->srv_conf)
+		if (srv_conf != &srv->srv_conf) {
+			free(srv_conf->ssl_cert);
+			free(srv_conf->ssl_key);
 			free(srv_conf);
+		}
 	}
+
+	ressl_config_free(srv->srv_ressl_config);
+	ressl_free(srv->srv_ressl_ctx);
 
 	free(srv);
 }
@@ -194,6 +310,43 @@ server_byaddr(struct sockaddr *addr, in_port_t port)
 	}
 
 	return (NULL);
+}
+
+struct server_config *
+serverconfig_byid(u_int32_t id)
+{
+	struct server		*srv;
+	struct server_config	*srv_conf;
+
+	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
+		if (srv->srv_conf.id == id)
+			return (&srv->srv_conf);
+		TAILQ_FOREACH(srv_conf, &srv->srv_hosts, entry) {
+			if (srv_conf->id == id)
+				return (srv_conf);
+		}
+	}
+
+	return (NULL);
+}
+
+int
+server_foreach(int (*srv_cb)(struct server *,
+    struct server_config *, void *), void *arg)
+{
+	struct server		*srv;
+	struct server_config	*srv_conf;
+
+	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
+		if ((srv_cb)(srv, &srv->srv_conf, arg) == -1)
+			return (-1);
+		TAILQ_FOREACH(srv_conf, &srv->srv_hosts, entry) {
+			if ((srv_cb)(srv, srv_conf, arg) == -1)
+				return (-1);
+		}
+	}
+
+	return (0);
 }
 
 int
@@ -235,7 +388,7 @@ server_socket_getport(struct sockaddr_storage *ss)
 
 int
 server_socket(struct sockaddr_storage *ss, in_port_t port,
-    struct server *srv, int fd, int reuseport)
+    struct server_config *srv_conf, int fd, int reuseport)
 {
 	struct linger	lng;
 	int		s = -1, val;
@@ -256,17 +409,17 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 	if (reuseport) {
 		val = 1;
 		if (setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &val,
-			sizeof(int)) == -1)
+		    sizeof(int)) == -1)
 			goto bad;
 	}
 	if (fcntl(s, F_SETFL, O_NONBLOCK) == -1)
 		goto bad;
-	if (srv->srv_tcpflags & TCPFLAG_BUFSIZ) {
-		val = srv->srv_tcpbufsiz;
+	if (srv_conf->tcpflags & TCPFLAG_BUFSIZ) {
+		val = srv_conf->tcpbufsiz;
 		if (setsockopt(s, SOL_SOCKET, SO_RCVBUF,
 		    &val, sizeof(val)) == -1)
 			goto bad;
-		val = srv->srv_tcpbufsiz;
+		val = srv_conf->tcpbufsiz;
 		if (setsockopt(s, SOL_SOCKET, SO_SNDBUF,
 		    &val, sizeof(val)) == -1)
 			goto bad;
@@ -275,14 +428,14 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 	/*
 	 * IP options
 	 */
-	if (srv->srv_tcpflags & TCPFLAG_IPTTL) {
-		val = (int)srv->srv_tcpipttl;
+	if (srv_conf->tcpflags & TCPFLAG_IPTTL) {
+		val = (int)srv_conf->tcpipttl;
 		if (setsockopt(s, IPPROTO_IP, IP_TTL,
 		    &val, sizeof(val)) == -1)
 			goto bad;
 	}
-	if (srv->srv_tcpflags & TCPFLAG_IPMINTTL) {
-		val = (int)srv->srv_tcpipminttl;
+	if (srv_conf->tcpflags & TCPFLAG_IPMINTTL) {
+		val = (int)srv_conf->tcpipminttl;
 		if (setsockopt(s, IPPROTO_IP, IP_MINTTL,
 		    &val, sizeof(val)) == -1)
 			goto bad;
@@ -291,8 +444,8 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 	/*
 	 * TCP options
 	 */
-	if (srv->srv_tcpflags & (TCPFLAG_NODELAY|TCPFLAG_NNODELAY)) {
-		if (srv->srv_tcpflags & TCPFLAG_NNODELAY)
+	if (srv_conf->tcpflags & (TCPFLAG_NODELAY|TCPFLAG_NNODELAY)) {
+		if (srv_conf->tcpflags & TCPFLAG_NNODELAY)
 			val = 0;
 		else
 			val = 1;
@@ -300,8 +453,8 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 		    &val, sizeof(val)) == -1)
 			goto bad;
 	}
-	if (srv->srv_tcpflags & (TCPFLAG_SACK|TCPFLAG_NSACK)) {
-		if (srv->srv_tcpflags & TCPFLAG_NSACK)
+	if (srv_conf->tcpflags & (TCPFLAG_SACK|TCPFLAG_NSACK)) {
+		if (srv_conf->tcpflags & TCPFLAG_NSACK)
 			val = 0;
 		else
 			val = 1;
@@ -320,16 +473,16 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 
 int
 server_socket_listen(struct sockaddr_storage *ss, in_port_t port,
-    struct server *srv)
+    struct server_config *srv_conf)
 {
 	int s;
 
-	if ((s = server_socket(ss, port, srv, -1, 1)) == -1)
+	if ((s = server_socket(ss, port, srv_conf, -1, 1)) == -1)
 		return (-1);
 
 	if (bind(s, (struct sockaddr *)ss, ss->ss_len) == -1)
 		goto bad;
-	if (listen(s, srv->srv_tcpbacklog) == -1)
+	if (listen(s, srv_conf->tcpbacklog) == -1)
 		goto bad;
 
 	return (s);
@@ -339,21 +492,167 @@ server_socket_listen(struct sockaddr_storage *ss, in_port_t port,
 	return (-1);
 }
 
+int
+server_socket_connect(struct sockaddr_storage *ss, in_port_t port,
+    struct server_config *srv_conf)
+{
+	int	s;
+
+	if ((s = server_socket(ss, port, srv_conf, -1, 0)) == -1)
+		return (-1);
+
+	if (connect(s, (struct sockaddr *)ss, ss->ss_len) == -1) {
+		if (errno != EINPROGRESS)
+			goto bad;
+	}
+
+	return (s);
+
+ bad:
+	close(s);
+	return (-1);
+}
+
+void
+server_ssl_readcb(int fd, short event, void *arg)
+{
+	struct bufferevent	*bufev = arg;
+	struct client		*clt = bufev->cbarg;
+	char			 rbuf[IBUF_READ_SIZE];
+	int			 what = EVBUFFER_READ;
+	int			 howmuch = IBUF_READ_SIZE;
+	int			 ret;
+	size_t			 len;
+
+	if (event == EV_TIMEOUT) {
+		what |= EVBUFFER_TIMEOUT;
+		goto err;
+	}
+
+	if (bufev->wm_read.high != 0)
+		howmuch = MIN(sizeof(rbuf), bufev->wm_read.high);
+
+	ret = ressl_read(clt->clt_ressl_ctx, rbuf, howmuch, &len);
+	if (ret == RESSL_READ_AGAIN || ret == RESSL_WRITE_AGAIN) {
+		goto retry;
+	} else if (ret != 0) {
+		what |= EVBUFFER_ERROR;
+		goto err;
+	}
+
+	if (evbuffer_add(bufev->input, rbuf, len) == -1) {
+		what |= EVBUFFER_ERROR;
+		goto err;
+	}
+
+	server_bufferevent_add(&bufev->ev_read, bufev->timeout_read);
+
+	len = EVBUFFER_LENGTH(bufev->input);
+	if (bufev->wm_read.low != 0 && len < bufev->wm_read.low)
+		return;
+	if (bufev->wm_read.high != 0 && len > bufev->wm_read.high) {
+		struct evbuffer *buf = bufev->input;
+		event_del(&bufev->ev_read);
+		evbuffer_setcb(buf, bufferevent_read_pressure_cb, bufev);
+		return;
+	}
+
+	if (bufev->readcb != NULL)
+		(*bufev->readcb)(bufev, bufev->cbarg);
+	return;
+
+ retry:
+	server_bufferevent_add(&bufev->ev_read, bufev->timeout_read);
+	return;
+
+ err:
+	(*bufev->errorcb)(bufev, what, bufev->cbarg);
+}
+
+void
+server_ssl_writecb(int fd, short event, void *arg)
+{
+	struct bufferevent	*bufev = arg;
+	struct client		*clt = bufev->cbarg;
+	int			 ret;
+	short			 what = EVBUFFER_WRITE;
+	size_t			 len;
+
+	if (event == EV_TIMEOUT) {
+		what |= EVBUFFER_TIMEOUT;
+		goto err;
+	}
+
+	if (EVBUFFER_LENGTH(bufev->output)) {
+		if (clt->clt_buf == NULL) {
+			clt->clt_buflen = EVBUFFER_LENGTH(bufev->output);
+			if ((clt->clt_buf = malloc(clt->clt_buflen)) == NULL) {
+				what |= EVBUFFER_ERROR;
+				goto err;
+			}
+			bcopy(EVBUFFER_DATA(bufev->output),
+			    clt->clt_buf, clt->clt_buflen);
+		}
+		ret = ressl_write(clt->clt_ressl_ctx, clt->clt_buf,
+		    clt->clt_buflen, &len);
+		if (ret == RESSL_READ_AGAIN || ret == RESSL_WRITE_AGAIN) {
+			goto retry;
+		} else if (ret != 0) {
+			what |= EVBUFFER_ERROR;
+			goto err;
+		}
+		evbuffer_drain(bufev->output, len);
+	}
+	if (clt->clt_buf != NULL) {
+		free(clt->clt_buf);
+		clt->clt_buf = NULL;
+		clt->clt_buflen = 0;
+	}
+
+	if (EVBUFFER_LENGTH(bufev->output) != 0)
+		server_bufferevent_add(&bufev->ev_write, bufev->timeout_write);
+
+	if (bufev->writecb != NULL &&
+	    EVBUFFER_LENGTH(bufev->output) <= bufev->wm_write.low)
+		(*bufev->writecb)(bufev, bufev->cbarg);
+	return;
+
+ retry:
+	if (clt->clt_buflen != 0)
+		server_bufferevent_add(&bufev->ev_write, bufev->timeout_write);
+	return;
+
+ err:
+	if (clt->clt_buf != NULL) {
+		free(clt->clt_buf);
+		clt->clt_buf = NULL;
+		clt->clt_buflen = 0;
+	}
+	(*bufev->errorcb)(bufev, what, bufev->cbarg);
+}
+
 void
 server_input(struct client *clt)
 {
 	struct server_config	*srv_conf = clt->clt_srv_conf;
 	evbuffercb		 inrd = server_read;
 	evbuffercb		 inwr = server_write;
+	socklen_t		 slen;
 
 	if (server_httpdesc_init(clt) == -1) {
-		server_close(clt,
-		    "failed to allocate http descriptor");
+		server_close(clt, "failed to allocate http descriptor");
 		return;
 	}
 
 	clt->clt_toread = TOREAD_HTTP_HEADER;
 	inrd = server_read_http;
+
+	slen = sizeof(clt->clt_sndbufsiz);
+	if (getsockopt(clt->clt_s, SOL_SOCKET, SO_SNDBUF,
+	    &clt->clt_sndbufsiz, &slen) == -1) {
+		server_close(clt, "failed to get send buffer size");
+		return;
+	}
 
 	/*
 	 * Client <-> Server
@@ -364,6 +663,19 @@ server_input(struct client *clt)
 		server_close(clt, "failed to allocate input buffer event");
 		return;
 	}
+
+	if (srv_conf->flags & SRVFLAG_SSL) {
+		event_set(&clt->clt_bev->ev_read, clt->clt_s, EV_READ,
+		    server_ssl_readcb, clt->clt_bev);
+		event_set(&clt->clt_bev->ev_write, clt->clt_s, EV_WRITE,
+		    server_ssl_writecb, clt->clt_bev);
+	}
+
+	/* Adjust write watermark to the socket buffer output size */
+	bufferevent_setwatermark(clt->clt_bev, EV_WRITE,
+	    clt->clt_sndbufsiz, 0);
+	/* Read at most amount of data that fits in one fcgi record. */
+	bufferevent_setwatermark(clt->clt_bev, EV_READ, 0, FCGI_CONTENT_SIZE);
 
 	bufferevent_settimeout(clt->clt_bev,
 	    srv_conf->timeout.tv_sec, srv_conf->timeout.tv_sec);
@@ -384,15 +696,19 @@ server_write(struct bufferevent *bev, void *arg)
 
 	if (clt->clt_done)
 		goto done;
+
+	bufferevent_enable(bev, EV_READ);
 	return;
  done:
-	server_close(clt, "done");
+	(*bev->errorcb)(bev, EVBUFFER_WRITE|EVBUFFER_EOF, bev->cbarg);
 	return;
 }
 
 void
 server_dump(struct client *clt, const void *buf, size_t len)
 {
+	size_t			 outlen;
+
 	if (!len)
 		return;
 
@@ -402,11 +718,9 @@ server_dump(struct client *clt, const void *buf, size_t len)
 	 * of non-blocking events etc. This is useful to print an
 	 * error message before gracefully closing the client.
 	 */
-#if 0
-	if (cre->ssl != NULL)
-		(void)SSL_write(cre->ssl, buf, len);
+	if (clt->clt_ressl_ctx != NULL)
+		(void)ressl_write(clt->clt_ressl_ctx, buf, len, &outlen);
 	else
-#endif
 		(void)write(clt->clt_s, buf, len);
 }
 
@@ -424,10 +738,9 @@ server_read(struct bufferevent *bev, void *arg)
 		goto fail;
 	if (clt->clt_done)
 		goto done;
-	bufferevent_enable(bev, EV_READ);
 	return;
  done:
-	server_close(clt, "done");
+	(*bev->errorcb)(bev, EVBUFFER_READ|EVBUFFER_EOF, bev->cbarg);
 	return;
  fail:
 	server_close(clt, strerror(errno));
@@ -549,6 +862,13 @@ server_accept(int fd, short event, void *arg)
 		return;
 	}
 
+	if (srv->srv_conf.flags & SRVFLAG_SSL) {
+		event_again(&clt->clt_ev, clt->clt_s, EV_TIMEOUT|EV_READ,
+		    server_accept_ssl, &clt->clt_tv_start,
+		    &srv->srv_conf.timeout, clt);
+		return;
+	}
+
 	server_input(clt);
 	return;
 
@@ -566,6 +886,41 @@ server_accept(int fd, short event, void *arg)
 }
 
 void
+server_accept_ssl(int fd, short event, void *arg)
+{
+	struct client *clt = (struct client *)arg;
+	struct server *srv = (struct server *)clt->clt_srv;
+	int ret;
+
+	if (event == EV_TIMEOUT) {
+		server_close(clt, "SSL accept timeout");
+		return;
+	}
+
+	if (srv->srv_ressl_ctx == NULL)
+		fatalx("NULL ressl context");
+
+	ret = ressl_accept_socket(srv->srv_ressl_ctx, &clt->clt_ressl_ctx,
+	    clt->clt_s);
+	if (ret == RESSL_READ_AGAIN) {
+		event_again(&clt->clt_ev, clt->clt_s, EV_TIMEOUT|EV_READ,
+		    server_accept_ssl, &clt->clt_tv_start,
+		    &srv->srv_conf.timeout, clt);
+	} else if (ret == RESSL_WRITE_AGAIN) {
+		event_again(&clt->clt_ev, clt->clt_s, EV_TIMEOUT|EV_WRITE,
+		    server_accept_ssl, &clt->clt_tv_start,
+		    &srv->srv_conf.timeout, clt);
+	} else if (ret != 0) {
+		log_warnx("%s: SSL accept failed - %s", __func__,
+		    ressl_error(srv->srv_ressl_ctx));
+		return;
+	}
+
+	server_input(clt);
+	return;
+}
+
+void
 server_inflight_dec(struct client *clt, const char *why)
 {
 	if (clt != NULL) {
@@ -577,17 +932,93 @@ server_inflight_dec(struct client *clt, const char *why)
 
 	/* the file was never opened, thus this was an inflight client. */
 	server_inflight--;
-	log_debug("%s: inflight decremented, now %d, %s",
+	DPRINTF("%s: inflight decremented, now %d, %s",
 	    __func__, server_inflight, why);
+}
+
+void
+server_sendlog(struct server_config *srv_conf, int cmd, const char *emsg, ...)
+{
+	va_list		 ap;
+	char		*msg;
+	int		 ret;
+	struct iovec	 iov[2];
+
+	if (srv_conf->flags & SRVFLAG_SYSLOG) {
+		va_start(ap, emsg);
+		if (cmd == IMSG_LOG_ACCESS)
+			vlog(LOG_INFO, emsg, ap);
+		else
+			vlog(LOG_DEBUG, emsg, ap);
+		va_end(ap);
+		return;
+	}
+
+	va_start(ap, emsg);
+	ret = vasprintf(&msg, emsg, ap);
+	va_end(ap);
+	if (ret == -1) {
+		log_warn("%s: vasprintf", __func__);
+		return;
+	}
+
+	iov[0].iov_base = &srv_conf->id;
+	iov[0].iov_len = sizeof(srv_conf->id);
+	iov[1].iov_base = msg;
+	iov[1].iov_len = strlen(msg) + 1;
+
+	proc_composev_imsg(env->sc_ps, PROC_LOGGER, -1, cmd, -1, iov, 2);
+}
+
+void
+server_log(struct client *clt, const char *msg)
+{
+	char			 ibuf[MAXHOSTNAMELEN], obuf[MAXHOSTNAMELEN];
+	struct server_config	*srv_conf = clt->clt_srv_conf;
+	char			*ptr = NULL;
+	int			 debug_cmd = -1;
+	extern int		 verbose;
+
+	switch (srv_conf->logformat) {
+	case LOG_FORMAT_CONNECTION:
+		debug_cmd = IMSG_LOG_ACCESS;
+		break;
+	default:
+		if (verbose > 1)
+			debug_cmd = IMSG_LOG_ERROR;
+		if (EVBUFFER_LENGTH(clt->clt_log)) {
+			while ((ptr =
+			    evbuffer_readline(clt->clt_log)) != NULL) {
+				server_sendlog(srv_conf,
+				    IMSG_LOG_ACCESS, "%s", ptr);
+				free(ptr);
+			}
+		}
+		break;
+	}
+
+	if (debug_cmd != -1 && msg != NULL) {
+		memset(ibuf, 0, sizeof(ibuf));
+		memset(obuf, 0, sizeof(obuf));
+		(void)print_host(&clt->clt_ss, ibuf, sizeof(ibuf));
+		(void)server_http_host(&clt->clt_srv_ss, obuf, sizeof(obuf));
+		if (EVBUFFER_LENGTH(clt->clt_log) &&
+		    evbuffer_add_printf(clt->clt_log, "\n") != -1)
+			ptr = evbuffer_readline(clt->clt_log);
+		server_sendlog(srv_conf, debug_cmd, "server %s, "
+		    "client %d (%d active), %s:%u -> %s, "
+		    "%s%s%s", srv_conf->name, clt->clt_id, server_clients,
+		    ibuf, ntohs(clt->clt_port), obuf, msg,
+		    ptr == NULL ? "" : ",", ptr == NULL ? "" : ptr);
+		if (ptr != NULL)
+			free(ptr);
+	}
 }
 
 void
 server_close(struct client *clt, const char *msg)
 {
-	char			 ibuf[MAXHOSTNAMELEN], obuf[MAXHOSTNAMELEN];
-	char			*ptr = NULL;
 	struct server		*srv = clt->clt_srv;
-	struct server_config	*srv_conf = clt->clt_srv_conf;
 
 	SPLAY_REMOVE(client_tree, &srv->srv_clients, clt);
 
@@ -597,37 +1028,28 @@ server_close(struct client *clt, const char *msg)
 	event_del(&clt->clt_ev);
 	if (clt->clt_bev != NULL)
 		bufferevent_disable(clt->clt_bev, EV_READ|EV_WRITE);
-	if (clt->clt_file != NULL)
-		bufferevent_disable(clt->clt_file, EV_READ|EV_WRITE);
+	if (clt->clt_srvbev != NULL)
+		bufferevent_disable(clt->clt_srvbev, EV_READ|EV_WRITE);
 
-	if ((env->sc_opts & HTTPD_OPT_LOGUPDATE) && msg != NULL) {
-		memset(&ibuf, 0, sizeof(ibuf));
-		memset(&obuf, 0, sizeof(obuf));
-		(void)print_host(&clt->clt_ss, ibuf, sizeof(ibuf));
-		(void)server_http_host(&clt->clt_srv_ss, obuf, sizeof(obuf));
-		if (EVBUFFER_LENGTH(clt->clt_log) &&
-		    evbuffer_add_printf(clt->clt_log, "\r\n") != -1)
-			ptr = evbuffer_readline(clt->clt_log);
-		log_info("server %s, "
-		    "client %d (%d active), %s:%u -> %s, "
-		    "%s%s%s", srv_conf->name, clt->clt_id, server_clients,
-		    ibuf, ntohs(clt->clt_port), obuf, msg,
-		    ptr == NULL ? "" : ",", ptr == NULL ? "" : ptr);
-		if (ptr != NULL)
-			free(ptr);
-	}
+	server_log(clt, msg);
 
 	if (clt->clt_bev != NULL)
 		bufferevent_free(clt->clt_bev);
 	if (clt->clt_output != NULL)
 		evbuffer_free(clt->clt_output);
+	if (clt->clt_srvevb != NULL)
+		evbuffer_free(clt->clt_srvevb);
 
-	if (clt->clt_file != NULL)
-		bufferevent_free(clt->clt_file);
+	if (clt->clt_srvbev != NULL)
+		bufferevent_free(clt->clt_srvbev);
 	if (clt->clt_fd != -1)
 		close(clt->clt_fd);
 	if (clt->clt_s != -1)
 		close(clt->clt_s);
+
+	if (clt->clt_ressl_ctx != NULL)
+		ressl_close(clt->clt_ressl_ctx);
+	ressl_free(clt->clt_ressl_ctx);
 
 	server_inflight_dec(clt, __func__);
 
@@ -657,6 +1079,17 @@ server_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 	case IMSG_CTL_RESET:
 		config_getreset(env, imsg);
 		break;
+	default:
+		return (-1);
+	}
+
+	return (0);
+}
+
+int
+server_dispatch_logger(int fd, struct privsep_proc *p, struct imsg *imsg)
+{
+	switch (imsg->hdr.type) {
 	default:
 		return (-1);
 	}

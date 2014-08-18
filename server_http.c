@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.19 2014/07/25 23:25:38 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.44 2014/08/08 18:29:42 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -40,15 +40,13 @@
 #include <stdio.h>
 #include <err.h>
 #include <pwd.h>
+#include <syslog.h>
 #include <event.h>
 #include <fnmatch.h>
-
-#include <openssl/ssl.h>
 
 #include "httpd.h"
 #include "http.h"
 
-static void	 server_http_date(char *, size_t);
 static int	 server_httpmethod_cmp(const void *, const void *);
 static int	 server_httperror_cmp(const void *, const void *);
 void		 server_httpdesc_free(struct http_descriptor *);
@@ -78,7 +76,7 @@ server_http(struct httpd *x_env)
 void
 server_http_init(struct server *srv)
 {
-	/* nothing */	
+	/* nothing */
 }
 
 int
@@ -102,6 +100,10 @@ server_httpdesc_free(struct http_descriptor *desc)
 		free(desc->http_path);
 		desc->http_path = NULL;
 	}
+	if (desc->http_path_alias != NULL) {
+		free(desc->http_path_alias);
+		desc->http_path_alias = NULL;
+	}
 	if (desc->http_query != NULL) {
 		free(desc->http_query);
 		desc->http_query = NULL;
@@ -109,6 +111,10 @@ server_httpdesc_free(struct http_descriptor *desc)
 	if (desc->http_version != NULL) {
 		free(desc->http_version);
 		desc->http_version = NULL;
+	}
+	if (desc->http_host != NULL) {
+		free(desc->http_host);
+		desc->http_host = NULL;
 	}
 	kv_purge(&desc->http_headers);
 	desc->http_lastheader = NULL;
@@ -118,6 +124,7 @@ void
 server_read_http(struct bufferevent *bev, void *arg)
 {
 	struct client		*clt = arg;
+	struct server_config	*srv_conf = clt->clt_srv_conf;
 	struct http_descriptor	*desc = clt->clt_desc;
 	struct evbuffer		*src = EVBUFFER_INPUT(bev);
 	char			*line = NULL, *key, *value;
@@ -259,6 +266,11 @@ server_read_http(struct bufferevent *bev, void *arg)
 				server_abort_http(clt, 500, errstr);
 				goto abort;
 			}
+			if ((size_t)clt->clt_toread >
+			    srv_conf->maxrequestbody) {
+				server_abort_http(clt, 413, NULL);
+				goto abort;
+			}
 		}
 
 		if (strcasecmp("Transfer-Encoding", key) == 0 &&
@@ -320,10 +332,10 @@ server_read_http(struct bufferevent *bev, void *arg)
 		}
 
  done:
-		if (clt->clt_toread <= 0) {
-			server_response(env, clt);
-			return;
-		}
+		if (clt->clt_toread != 0)
+			bufferevent_disable(bev, EV_READ);
+		server_response(env, clt);
+		return;
 	}
 	if (clt->clt_done) {
 		server_close(clt, "done");
@@ -359,12 +371,11 @@ server_read_httpcontent(struct bufferevent *bev, void *arg)
 		/* Read content data */
 		if ((off_t)size > clt->clt_toread) {
 			size = clt->clt_toread;
-			if (server_bufferevent_write_chunk(clt,
-			    src, size) == -1)
+			if (fcgi_add_stdin(clt, src) == -1)
 				goto fail;
 			clt->clt_toread = 0;
 		} else {
-			if (server_bufferevent_write_buffer(clt, src) == -1)
+			if (fcgi_add_stdin(clt, src) == -1)
 				goto fail;
 			clt->clt_toread -= size;
 		}
@@ -372,17 +383,19 @@ server_read_httpcontent(struct bufferevent *bev, void *arg)
 		    size, clt->clt_toread);
 	}
 	if (clt->clt_toread == 0) {
+		fcgi_add_stdin(clt, NULL);
 		clt->clt_toread = TOREAD_HTTP_HEADER;
+		bufferevent_disable(bev, EV_READ);
 		bev->readcb = server_read_http;
+		return;
 	}
 	if (clt->clt_done)
 		goto done;
 	if (bev->readcb != server_read_httpcontent)
 		bev->readcb(bev, arg);
-	bufferevent_enable(bev, EV_READ);
+
 	return;
  done:
-	server_close(clt, "last http content read");
 	return;
  fail:
 	server_close(clt, strerror(errno));
@@ -514,11 +527,14 @@ server_reset_http(struct client *clt)
 	clt->clt_headerlen = 0;
 	clt->clt_line = 0;
 	clt->clt_done = 0;
+	clt->clt_chunk = 0;
 	clt->clt_bev->readcb = server_read_http;
 	clt->clt_srv_conf = &srv->srv_conf;
+
+	server_log(clt, NULL);
 }
 
-static void
+void
 server_http_date(char *tmbuf, size_t len)
 {
 	time_t			 t;
@@ -565,7 +581,8 @@ server_http_host(struct sockaddr_storage *ss, char *buf, size_t len)
 void
 server_abort_http(struct client *clt, u_int code, const char *msg)
 {
-	struct server_config	*srv_conf = clt->clt_srv_conf;
+	struct server		*srv = clt->clt_srv;
+	struct server_config	*srv_conf = &srv->srv_conf;
 	struct bufferevent	*bev = clt->clt_bev;
 	const char		*httperr = NULL, *text = "";
 	char			*httpmsg, *extraheader = NULL;
@@ -576,6 +593,9 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 		httperr = "Unknown Error";
 
 	if (bev == NULL)
+		goto done;
+
+	if (server_log_http(clt, code, 0) == -1)
 		goto done;
 
 	/* Some system information */
@@ -603,14 +623,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 
 	/* A CSS stylesheet allows minimal customization by the user */
 	style = "body { background-color: white; color: black; font-family: "
-	    "'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', sans-serif; }"
-	    "blink { animation:blink 1s; animation-iteration-count: infinite;"
-	    "-webkit-animation:blink 1s;"
-	    "-webkit-animation-iteration-count: infinite;}"
-	    "@keyframes blink { 0%{opacity:0.0;} 50%{opacity:0.0;}"
-	    "50.01%{opacity:1.0;} 100%{opacity:1.0;} }"
-	    "@-webkit-keyframes blink { 0%{opacity:0.0;} 50%{opacity:0.0;}"
-	    "50.01%{opacity:1.0;} 100%{opacity:1.0;} }";
+	    "'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', sans-serif; }";
 	/* Generate simple HTTP+HTML error document */
 	if (asprintf(&httpmsg,
 	    "HTTP/1.0 %03d %s\r\n"
@@ -628,7 +641,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	    "<style type=\"text/css\"><!--\n%s\n--></style>\n"
 	    "</head>\n"
 	    "<body>\n"
-	    "<h1><blink>%s</blink></h1>\n"
+	    "<h1>%s</h1>\n"
 	    "<div id='m'>%s</div>\n"
 	    "<hr><address>%s at %s port %d</address>\n"
 	    "</body>\n"
@@ -645,9 +658,9 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 
  done:
 	free(extraheader);
-	if (asprintf(&httpmsg, "%s (%03d %s)", msg, code, httperr) == -1)
+	if (asprintf(&httpmsg, "%s (%03d %s)", msg, code, httperr) == -1) {
 		server_close(clt, msg);
-	else {
+	} else {
 		server_close(clt, httpmsg);
 		free(httpmsg);
 	}
@@ -668,11 +681,11 @@ int
 server_response(struct httpd *httpd, struct client *clt)
 {
 	char			 path[MAXPATHLEN];
+	char			 hostname[MAXHOSTNAMELEN];
 	struct http_descriptor	*desc	= clt->clt_desc;
 	struct server		*srv = clt->clt_srv;
 	struct server_config	*srv_conf = &srv->srv_conf;
 	struct kv		*kv, key, *host;
-	int			 ret;
 
 	/* Canonicalize the request path */
 	if (desc->http_path == NULL ||
@@ -709,6 +722,9 @@ server_response(struct httpd *httpd, struct client *clt)
 			clt->clt_persist = 0;
 	}
 
+	if (clt->clt_persist >= srv_conf->maxrequests)
+		clt->clt_persist = 0;
+
 	/*
 	 * Do we have a Host header and matching configuration?
 	 * XXX the Host can also appear in the URL path.
@@ -716,7 +732,8 @@ server_response(struct httpd *httpd, struct client *clt)
 	if (host != NULL) {
 		/* XXX maybe better to turn srv_hosts into a tree */
 		TAILQ_FOREACH(srv_conf, &srv->srv_hosts, entry) {
-			if (fnmatch(srv_conf->name, host->kv_value,
+			if ((srv_conf->flags & SRVFLAG_LOCATION) == 0 &&
+			    fnmatch(srv_conf->name, host->kv_value,
 			    FNM_CASEFOLD) == 0) {
 				/* Replace host configuration */
 				clt->clt_srv_conf = srv_conf;
@@ -728,25 +745,47 @@ server_response(struct httpd *httpd, struct client *clt)
 
 	if (srv_conf != NULL) {
 		/* Use the actual server IP address */
-		if (server_http_host(&clt->clt_srv_ss, desc->http_host,
-		    sizeof(desc->http_host)) == NULL)
+		if (server_http_host(&clt->clt_srv_ss, hostname,
+		    sizeof(hostname)) == NULL)
 			goto fail;
 	} else {
 		/* Host header was valid and found */
-		if (strlcpy(desc->http_host, host->kv_value,
-		    sizeof(desc->http_host)) >= sizeof(desc->http_host))
+		if (strlcpy(hostname, host->kv_value, sizeof(hostname)) >=
+		    sizeof(hostname))
 			goto fail;
+		srv_conf = clt->clt_srv_conf;
 	}
 
-	if ((ret = server_file(httpd, clt)) == -1)
-		return (-1);
+	if ((desc->http_host = strdup(hostname)) == NULL)
+		goto fail;
 
-	server_reset_http(clt);
+	/* Now search for the location */
+	srv_conf = server_getlocation(clt, desc->http_path);
 
-	return (0);
+	return (server_file(httpd, clt));
  fail:
 	server_abort_http(clt, 400, "bad request");
 	return (-1);
+}
+
+struct server_config *
+server_getlocation(struct client *clt, const char *path)
+{
+	struct server		*srv = clt->clt_srv;
+	struct server_config	*srv_conf = clt->clt_srv_conf, *location;
+
+	/* Now search for the location */
+	TAILQ_FOREACH(location, &srv->srv_hosts, entry) {
+		if ((location->flags & SRVFLAG_LOCATION) &&
+		    location->id == srv_conf->id &&
+		    fnmatch(location->location, path, FNM_CASEFOLD) == 0) {
+			/* Replace host configuration */
+			clt->clt_srv_conf = srv_conf = location;
+			break;
+		}
+	}
+
+	return (srv_conf);
 }
 
 int
@@ -759,6 +798,9 @@ server_response_http(struct client *clt, u_int code,
 	char			 tmbuf[32];
 
 	if (desc == NULL || (error = server_httperror_byid(code)) == NULL)
+		return (-1);
+
+	if (server_log_http(clt, code, size) == -1)
 		return (-1);
 
 	kv_purge(&desc->http_headers);
@@ -788,9 +830,9 @@ server_response_http(struct client *clt, u_int code,
 		return (-1);
 
 	/* Set content length, if specified */
-	if (size && ((cl =
+	if ((cl =
 	    kv_add(&desc->http_headers, "Content-Length", NULL)) == NULL ||
-	    kv_set(cl, "%ld", size) == -1))
+	    kv_set(cl, "%ld", size) == -1)
 		return (-1);
 
 	/* Date header is mandatory and should be added last */
@@ -801,11 +843,11 @@ server_response_http(struct client *clt, u_int code,
 	/* Write completed header */
 	if (server_writeresponse_http(clt) == -1 ||
 	    server_bufferevent_print(clt, "\r\n") == -1 ||
-	    server_writeheader_http(clt) == -1 ||
+	    server_headers(clt, server_writeheader_http, NULL) == -1 ||
 	    server_bufferevent_print(clt, "\r\n") == -1)
 		return (-1);
 
-	if (desc->http_method == HTTP_METHOD_HEAD) {
+	if (size == 0 || desc->http_method == HTTP_METHOD_HEAD) {
 		bufferevent_enable(clt->clt_bev, EV_READ|EV_WRITE);
 		if (clt->clt_persist)
 			clt->clt_toread = TOREAD_HTTP_HEADER;
@@ -837,7 +879,7 @@ server_writeresponse_http(struct client *clt)
 }
 
 int
-server_writeheader_kv(struct client *clt, struct kv *hdr)
+server_writeheader_http(struct client *clt, struct kv *hdr, void *arg)
 {
 	char			*ptr;
 	const char		*key;
@@ -865,16 +907,17 @@ server_writeheader_kv(struct client *clt, struct kv *hdr)
 }
 
 int
-server_writeheader_http(struct client *clt)
+server_headers(struct client *clt,
+    int (*hdr_cb)(struct client *, struct kv *, void *), void *arg)
 {
 	struct kv		*hdr, *kv;
 	struct http_descriptor	*desc = (struct http_descriptor *)clt->clt_desc;
 
 	RB_FOREACH(hdr, kvtree, &desc->http_headers) {
-		if (server_writeheader_kv(clt, hdr) == -1)
+		if ((hdr_cb)(clt, hdr, arg) == -1)
 			return (-1);
 		TAILQ_FOREACH(kv, &hdr->kv_children, kv_entry) {
-			if (server_writeheader_kv(clt, kv) == -1)
+			if ((hdr_cb)(clt, kv, arg) == -1)
 				return (-1);
 		}
 	}
@@ -949,4 +992,91 @@ server_httperror_cmp(const void *a, const void *b)
 	const struct http_error *ea = a;
 	const struct http_error *eb = b;
 	return (ea->error_code - eb->error_code);
+}
+
+int
+server_log_http(struct client *clt, u_int code, size_t len)
+{
+	static char		 tstamp[64];
+	static char		 ip[INET6_ADDRSTRLEN];
+	time_t			 t;
+	struct kv		 key, *agent, *referrer;
+	struct tm		*tm;
+	struct server_config	*srv_conf;
+	struct http_descriptor	*desc;
+
+	if ((srv_conf = clt->clt_srv_conf) == NULL)
+		return (-1);
+	if ((srv_conf->flags & SRVFLAG_LOG) == 0)
+		return (0);
+	if ((desc = clt->clt_desc) == NULL)
+		return (-1);
+
+	if ((t = time(NULL)) == -1)
+		return (-1);
+	if ((tm = localtime(&t)) == NULL)
+		return (-1);
+	if (strftime(tstamp, sizeof(tstamp), "%d/%b/%Y:%H:%M:%S %z", tm) == 0)
+		return (-1);
+
+	if (print_host(&clt->clt_ss, ip, sizeof(ip)) == NULL)
+		return (-1);
+
+	/*
+	 * For details on common log format, see:
+	 * https://httpd.apache.org/docs/current/mod/mod_log_config.html
+	 *
+	 * httpd's format is similar to these Apache LogFormats:
+	 * "%v %h %l %u %t \"%r\" %>s %B"
+	 * "%v %h %l %u %t \"%r\" %>s %B \"%{Referer}i\" \"%{User-agent}i\""
+	 */
+	switch (srv_conf->logformat) {
+	case LOG_FORMAT_COMMON:
+		if (evbuffer_add_printf(clt->clt_log,
+		    "%s %s - - [%s] \"%s %s%s%s%s%s\" %03d %zu\n",
+		    srv_conf->name, ip, tstamp,
+		    server_httpmethod_byid(desc->http_method),
+		    desc->http_path == NULL ? "" : desc->http_path,
+		    desc->http_query == NULL ? "" : "?",
+		    desc->http_query == NULL ? "" : desc->http_query,
+		    desc->http_version == NULL ? "" : " ",
+		    desc->http_version == NULL ? "" : desc->http_version,
+		    code, len) == -1)
+			return (-1);
+		break;
+
+	case LOG_FORMAT_COMBINED:
+		key.kv_key = "Referer"; /* sic */
+		if ((referrer = kv_find(&desc->http_headers, &key)) != NULL &&
+		    referrer->kv_value == NULL)
+			referrer = NULL;
+
+		key.kv_key = "User-Agent";
+		if ((agent = kv_find(&desc->http_headers, &key)) != NULL &&
+		    agent->kv_value == NULL)
+			agent = NULL;
+
+		if (evbuffer_add_printf(clt->clt_log,
+		    "%s %s - - [%s] \"%s %s%s%s%s%s\" %03d %zu \"%s\" \"%s\"\n",
+		    srv_conf->name, ip, tstamp,
+		    server_httpmethod_byid(desc->http_method),
+		    desc->http_path == NULL ? "" : desc->http_path,
+		    desc->http_query == NULL ? "" : "?",
+		    desc->http_query == NULL ? "" : desc->http_query,
+		    desc->http_version == NULL ? "" : " ",
+		    desc->http_version == NULL ? "" : desc->http_version,
+		    code, len,
+		    referrer == NULL ? "" : referrer->kv_value,
+		    agent == NULL ? "" : agent->kv_value) == -1)
+			return (-1);
+		break;
+
+	case LOG_FORMAT_CONNECTION:
+		if (evbuffer_add_printf(clt->clt_log, " [%s]",
+		    desc->http_path == NULL ? "" : desc->http_path) == -1)
+			return (-1);
+		break;
+	}
+
+	return (0);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.10 2014/07/26 09:59:14 reyk Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.19 2014/08/13 16:04:28 reyk Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <sys/hash.h>
@@ -42,8 +43,6 @@
 #include <sha1.h>
 #include <md5.h>
 
-#include <openssl/ssl.h>
-
 #include "httpd.h"
 
 __dead void	 usage(void);
@@ -51,15 +50,19 @@ __dead void	 usage(void);
 int		 parent_configure(struct httpd *);
 void		 parent_configure_done(struct httpd *);
 void		 parent_reload(struct httpd *, u_int, const char *);
+void		 parent_reopen(struct httpd *);
 void		 parent_sig_handler(int, short, void *);
 void		 parent_shutdown(struct httpd *);
 int		 parent_dispatch_server(int, struct privsep_proc *,
+		    struct imsg *);
+int		 parent_dispatch_logger(int, struct privsep_proc *,
 		    struct imsg *);
 
 struct httpd			*httpd_env;
 
 static struct privsep_proc procs[] = {
-	{ "server",	PROC_SERVER, parent_dispatch_server, server }
+	{ "server",	PROC_SERVER, parent_dispatch_server, server },
+	{ "logger",	PROC_LOGGER, parent_dispatch_logger, logger }
 };
 
 void
@@ -123,6 +126,11 @@ parent_sig_handler(int sig, short event, void *arg)
 	case SIGPIPE:
 		/* ignore */
 		break;
+	case SIGUSR1:
+		log_info("%s: reopen requested with SIGUSR1", __func__);
+
+		parent_reopen(ps->ps_env);
+		break;
 	default:
 		fatalx("unexpected signal");
 	}
@@ -142,6 +150,7 @@ int
 main(int argc, char *argv[])
 {
 	int			 c;
+	unsigned int		 proc;
 	int			 debug = 0, verbose = 0;
 	u_int32_t		 opts = 0;
 	struct httpd		*env;
@@ -194,9 +203,6 @@ main(int argc, char *argv[])
 	if (parse_config(env->sc_conffile, env) == -1)
 		exit(1);
 
-	if (debug)
-		env->sc_opts |= HTTPD_OPT_LOGUPDATE;
-
 	if (geteuid())
 		errx(1, "need root privileges");
 
@@ -220,6 +226,11 @@ main(int argc, char *argv[])
 	ps->ps_instances[PROC_SERVER] = env->sc_prefork_server;
 	ps->ps_ninstances = env->sc_prefork_server;
 
+	if (env->sc_chroot == NULL)
+		env->sc_chroot = ps->ps_pw->pw_dir;
+	for (proc = 0; proc < nitems(procs); proc++)
+		procs[proc].p_chroot = env->sc_chroot;
+
 	proc_init(ps, procs, nitems(procs));
 
 	setproctitle("parent");
@@ -231,12 +242,14 @@ main(int argc, char *argv[])
 	signal_set(&ps->ps_evsigchld, SIGCHLD, parent_sig_handler, ps);
 	signal_set(&ps->ps_evsighup, SIGHUP, parent_sig_handler, ps);
 	signal_set(&ps->ps_evsigpipe, SIGPIPE, parent_sig_handler, ps);
+	signal_set(&ps->ps_evsigusr1, SIGUSR1, parent_sig_handler, ps);
 
 	signal_add(&ps->ps_evsigint, NULL);
 	signal_add(&ps->ps_evsigterm, NULL);
 	signal_add(&ps->ps_evsigchld, NULL);
 	signal_add(&ps->ps_evsighup, NULL);
 	signal_add(&ps->ps_evsigpipe, NULL);
+	signal_add(&ps->ps_evsigusr1, NULL);
 
 	proc_listen(ps, procs, nitems(procs));
 
@@ -282,7 +295,7 @@ parent_configure(struct httpd *env)
 	}
 
 	/* The servers need to reload their config. */
-	env->sc_reload = env->sc_prefork_server;
+	env->sc_reload = env->sc_prefork_server + 1;
 
 	for (id = 0; id < PROC_MAX; id++) {
 		if (id == privsep_process)
@@ -334,6 +347,13 @@ parent_reload(struct httpd *env, u_int reset, const char *filename)
 }
 
 void
+parent_reopen(struct httpd *env)
+{
+	proc_compose_imsg(env->sc_ps, PROC_LOGGER, -1, IMSG_CTL_REOPEN,
+	    -1, NULL, 0);
+}
+
+void
 parent_configure_done(struct httpd *env)
 {
 	int	 id;
@@ -379,6 +399,46 @@ parent_dispatch_server(int fd, struct privsep_proc *p, struct imsg *imsg)
 	switch (imsg->hdr.type) {
 	case IMSG_CFG_DONE:
 		parent_configure_done(env);
+		break;
+	default:
+		return (-1);
+	}
+
+	return (0);
+}
+
+int
+parent_dispatch_logger(int fd, struct privsep_proc *p, struct imsg *imsg)
+{
+	struct httpd		*env = p->p_env;
+	u_int			 v;
+	char			*str = NULL;
+
+	switch (imsg->hdr.type) {
+	case IMSG_CTL_RESET:
+		IMSG_SIZE_CHECK(imsg, &v);
+		memcpy(&v, imsg->data, sizeof(v));
+		parent_reload(env, v, NULL);
+		break;
+	case IMSG_CTL_RELOAD:
+		if (IMSG_DATA_SIZE(imsg) > 0)
+			str = get_string(imsg->data, IMSG_DATA_SIZE(imsg));
+		parent_reload(env, CONFIG_RELOAD, str);
+		if (str != NULL)
+			free(str);
+		break;
+	case IMSG_CTL_SHUTDOWN:
+		parent_shutdown(env);
+		break;
+	case IMSG_CTL_REOPEN:
+		parent_reopen(env);
+		break;
+	case IMSG_CFG_DONE:
+		parent_configure_done(env);
+		break;
+	case IMSG_LOG_OPEN:
+		if (logger_open_priv(imsg) == -1)
+			fatalx("failed to open log file");
 		break;
 	default:
 		return (-1);
@@ -493,7 +553,7 @@ canonicalize_path(const char *input, char *path, size_t len)
 				while (i[1] == '/')
 					i++;
 				continue;
-			} else if (i[1] == '.' && i[2] == '.' && 
+			} else if (i[1] == '.' && i[2] == '.' &&
 			    (i[3] == '/' || i[3] == '\0')) {
 				/* b) revert '..' to previous directory */
 				i += 3;
@@ -518,6 +578,35 @@ canonicalize_path(const char *input, char *path, size_t len)
 	*p++ = '\0';
 
 	return (path);
+}
+
+size_t
+path_info(char *path)
+{
+	char		*p, *start, *end, ch;
+	struct stat	 st;
+	int		 ret;
+
+	start = path;
+	end = start + strlen(path);
+
+	for (p = end; p > start; p--) {
+		/* Scan every path component from the end and at each '/' */
+		if (p < end && *p != '/')
+			continue;
+
+		/* Temporarily cut the path component out */
+		ch = *p;
+		*p = '\0';
+		ret = stat(path, &st);
+		*p = ch;
+
+		/* Break if the initial path component was found */
+		if (ret == 0)
+			break;
+	}
+
+	return (p - start);
 }
 
 void

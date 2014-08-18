@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.7 2014/07/25 17:04:47 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.35 2014/08/09 07:35:45 reyk Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -53,8 +53,6 @@
 #include <ifaddrs.h>
 #include <syslog.h>
 
-#include <openssl/ssl.h>
-
 #include "httpd.h"
 #include "http.h"
 
@@ -94,7 +92,8 @@ static int		 errors = 0;
 static int		 loadcfg = 0;
 uint32_t		 last_server_id = 0;
 
-static struct server	*srv = NULL;
+static struct server	*srv = NULL, *parentsrv = NULL;
+static struct server_config *srv_conf = NULL;
 struct serverlist	 servers;
 struct media_type	 media;
 
@@ -126,12 +125,16 @@ typedef struct {
 
 %}
 
-%token	ALL PORT LISTEN PREFORK ROOT SERVER ERROR LOG VERBOSE ON TYPES
-%token	UPDATES INCLUDE
+%token	ACCESS AUTO BACKLOG BODY BUFFER CERTIFICATE CHROOT CIPHERS COMMON
+%token	COMBINED CONNECTION DIRECTORY ERR FCGI INDEX IP KEY LISTEN LOCATION
+%token	LOG MAXIMUM NO NODELAY ON PORT PREFORK REQUEST REQUESTS ROOT SACK
+%token	SERVER SOCKET SSL STYLE SYSLOG TCP TIMEOUT TYPES
+%token	ERROR INCLUDE
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
-%type	<v.number>	loglevel
 %type	<v.port>	port
+%type	<v.number>	optssl
+%type	<v.tv>		timeout
 
 %%
 
@@ -168,12 +171,11 @@ varset		: STRING '=' STRING	{
 		}
 		;
 
-main		: LOG loglevel		{
-			if (loadcfg)
-				break;
-			conf->sc_opts |= $2;
-		}
-		| PREFORK NUMBER	{
+optssl		: /*empty*/	{ $$ = 0; }
+		| SSL		{ $$ = 1; }
+		;
+
+main		: PREFORK NUMBER	{
 			if (loadcfg)
 				break;
 			if ($2 <= 0 || $2 > SERVER_MAXPROC) {
@@ -182,6 +184,9 @@ main		: LOG loglevel		{
 				YYERROR;
 			}
 			conf->sc_prefork_server = $2;
+		}
+		| CHROOT STRING		{
+			conf->sc_chroot = $2;
 		}
 		;
 
@@ -215,10 +220,28 @@ server		: SERVER STRING		{
 			}
 			free($2);
 
-			strlcpy(s->srv_conf.docroot, HTTPD_DOCROOT,
-			    sizeof(s->srv_conf.docroot));
+			strlcpy(s->srv_conf.root, HTTPD_DOCROOT,
+			    sizeof(s->srv_conf.root));
+			strlcpy(s->srv_conf.index, HTTPD_INDEX,
+			    sizeof(s->srv_conf.index));
+			strlcpy(s->srv_conf.accesslog, HTTPD_ACCESS_LOG,
+			    sizeof(s->srv_conf.accesslog));
+			strlcpy(s->srv_conf.errorlog, HTTPD_ERROR_LOG,
+			    sizeof(s->srv_conf.errorlog));
 			s->srv_conf.id = ++last_server_id;
 			s->srv_conf.timeout.tv_sec = SERVER_TIMEOUT;
+			s->srv_conf.maxrequests = SERVER_MAXREQUESTS;
+			s->srv_conf.maxrequestbody = SERVER_MAXREQUESTBODY;
+			s->srv_conf.flags |= SRVFLAG_LOG;
+			s->srv_conf.logformat = LOG_FORMAT_COMMON;
+			if ((s->srv_conf.ssl_cert_file =
+			    strdup(HTTPD_SSL_CERT)) == NULL)
+				fatal("out of memory");
+			if ((s->srv_conf.ssl_key_file =
+			    strdup(HTTPD_SSL_KEY)) == NULL)
+				fatal("out of memory");
+			strlcpy(s->srv_conf.ssl_ciphers, HTTPD_SSL_CIPHERS,
+			    sizeof(s->srv_conf.ssl_ciphers));
 
 			if (last_server_id == INT_MAX) {
 				yyerror("too many servers defined");
@@ -226,9 +249,23 @@ server		: SERVER STRING		{
 				YYERROR;
 			}
 			srv = s;
-		} '{' optnl serveropts_l '}'	{
+			srv_conf = &srv->srv_conf;
+
 			SPLAY_INIT(&srv->srv_clients);
 			TAILQ_INSERT_TAIL(conf->sc_servers, srv, srv_entry);
+		} '{' optnl serveropts_l '}'	{
+			if (srv->srv_conf.ss.ss_family == AF_UNSPEC) {
+				yyerror("listen address not specified");
+				free($2);
+				YYERROR;
+			}
+			if (server_ssl_load_keypair(srv) == -1) {
+				yyerror("failed to load public/private keys "
+				    "for server %s", srv->srv_conf.name);
+				YYERROR;
+			}
+			srv = NULL;
+			srv_conf = NULL;
 		}
 		;
 
@@ -236,10 +273,16 @@ serveropts_l	: serveropts_l serveroptsl nl
 		| serveroptsl optnl
 		;
 
-serveroptsl	: LISTEN ON STRING port {
+serveroptsl	: LISTEN ON STRING optssl port {
 			struct addresslist	 al;
 			struct address		*h;
 			struct server		*s;
+
+			if (parentsrv != NULL) {
+				yyerror("listen %s inside location", $3);
+				free($3);
+				YYERROR;
+			}
 
 			if (srv->srv_conf.ss.ss_family != AF_UNSPEC) {
 				yyerror("listen address already specified");
@@ -247,14 +290,14 @@ serveroptsl	: LISTEN ON STRING port {
 				YYERROR;
 			} else
 				s = srv;
-			if ($4.op != PF_OP_EQ) {
+			if ($5.op != PF_OP_EQ) {
 				yyerror("invalid port");
 				free($3);
 				YYERROR;
 			}
 
 			TAILQ_INIT(&al);
-			if (host($3, &al, 1, &$4, NULL, -1) <= 0) {
+			if (host($3, &al, 1, &$5, NULL, -1) <= 0) {
 				yyerror("invalid listen ip: %s", $3);
 				free($3);
 				YYERROR;
@@ -266,12 +309,346 @@ serveroptsl	: LISTEN ON STRING port {
 			s->srv_conf.port = h->port.val[0];
 			s->srv_conf.prefixlen = h->prefixlen;
 			host_free(&al);
+
+			if ($4) {
+				s->srv_conf.flags |= SRVFLAG_SSL;
+			}
 		}
+		| TCP			{
+			if (parentsrv != NULL) {
+				yyerror("tcp flags inside location");
+				YYERROR;
+			}
+		} tcpip
+		| CONNECTION		{
+			if (parentsrv != NULL) {
+				yyerror("connection options inside location");
+				YYERROR;
+			}
+		} connection
+		| SSL			{
+			if (parentsrv != NULL) {
+				yyerror("ssl configuration inside location");
+				YYERROR;
+			}
+		} ssl
 		| ROOT STRING		{
-			if (strlcpy(srv->srv_conf.docroot, $2,
-			    sizeof(srv->srv_conf.docroot)) >=
-			    sizeof(srv->srv_conf.docroot)) {
+			if (strlcpy(srv->srv_conf.root, $2,
+			    sizeof(srv->srv_conf.root)) >=
+			    sizeof(srv->srv_conf.root)) {
 				yyerror("document root too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+			srv->srv_conf.flags |= SRVFLAG_ROOT;
+		}
+		| DIRECTORY dirflags
+		| DIRECTORY '{' dirflags_l '}'
+		| logformat
+		| fastcgi
+		| LOCATION STRING		{
+			struct server	*s;
+
+			if (srv->srv_conf.ss.ss_family == AF_UNSPEC) {
+				yyerror("listen address not specified");
+				free($2);
+				YYERROR;
+			}
+
+			if (parentsrv != NULL) {
+				yyerror("location %s inside location", $2);
+				free($2);
+				YYERROR;
+			}
+
+			if (!loadcfg) {
+				free($2);
+				YYACCEPT;
+			}
+
+			TAILQ_FOREACH(s, conf->sc_servers, srv_entry)
+				if (strcmp(s->srv_conf.name,
+				    srv->srv_conf.name) == 0 &&
+				    strcmp(s->srv_conf.location, $2) == 0)
+					break;
+			if (s != NULL) {
+				yyerror("location %s defined twice", $2);
+				free($2);
+				YYERROR;
+			}
+
+			if ((s = calloc(1, sizeof (*s))) == NULL)
+				fatal("out of memory");
+
+			if (strlcpy(s->srv_conf.location, $2,
+			    sizeof(s->srv_conf.location)) >=
+			    sizeof(s->srv_conf.location)) {
+				yyerror("server location truncated");
+				free($2);
+				free(s);
+				YYERROR;
+			}
+			free($2);
+
+			if (strlcpy(s->srv_conf.name, srv->srv_conf.name,
+			    sizeof(s->srv_conf.name)) >=
+			    sizeof(s->srv_conf.name)) {
+				yyerror("server name truncated");
+				free(s);
+				YYERROR;
+			}
+
+			/* A location entry uses the parent id */
+			s->srv_conf.id = srv->srv_conf.id;
+			s->srv_conf.flags = SRVFLAG_LOCATION;
+			memcpy(&s->srv_conf.ss, &srv->srv_conf.ss,
+			    sizeof(s->srv_conf.ss));
+			s->srv_conf.port = srv->srv_conf.port;
+			s->srv_conf.prefixlen = srv->srv_conf.prefixlen;
+
+			if (last_server_id == INT_MAX) {
+				yyerror("too many servers/locations defined");
+				free(s);
+				YYERROR;
+			}
+			parentsrv = srv;
+			srv = s;
+			srv_conf = &srv->srv_conf;
+			SPLAY_INIT(&srv->srv_clients);
+			TAILQ_INSERT_TAIL(conf->sc_servers, srv, srv_entry);
+		} '{' optnl serveropts_l '}'	{
+			srv = parentsrv;
+			srv_conf = &parentsrv->srv_conf;
+			parentsrv = NULL;
+		}
+		;
+
+fastcgi		: NO FCGI		{
+			srv_conf->flags &= ~SRVFLAG_FCGI;
+			srv_conf->flags |= SRVFLAG_NO_FCGI;
+		}
+		| FCGI			{
+			srv_conf->flags &= ~SRVFLAG_NO_FCGI;
+			srv_conf->flags |= SRVFLAG_FCGI;
+		}
+		| FCGI			{
+			srv_conf->flags &= ~SRVFLAG_NO_FCGI;
+			srv_conf->flags |= SRVFLAG_FCGI;
+		} '{' fcgiflags_l '}'
+		| FCGI			{
+			srv_conf->flags &= ~SRVFLAG_NO_FCGI;
+			srv_conf->flags |= SRVFLAG_FCGI;
+		} fcgiflags
+		;
+
+fcgiflags_l	: fcgiflags comma fcgiflags_l
+		| fcgiflags
+		;
+
+fcgiflags	: SOCKET STRING		{
+			if (strlcpy(srv_conf->socket, $2,
+			    sizeof(srv_conf->socket)) >=
+			    sizeof(srv_conf->socket)) {
+				yyerror("fastcgi socket too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+			srv_conf->flags |= SRVFLAG_SOCKET;
+		}
+		;
+
+connection	: '{' conflags_l '}'
+		| conflags
+		;
+
+conflags_l	: conflags comma conflags_l
+		| conflags
+		;
+
+conflags	: TIMEOUT timeout		{
+			memcpy(&srv_conf->timeout, &$2,
+			    sizeof(struct timeval));
+		}
+		| MAXIMUM REQUESTS NUMBER	{
+			srv_conf->maxrequests = $3;
+		}
+		| MAXIMUM REQUEST BODY NUMBER	{
+			srv_conf->maxrequestbody = $4;
+		}
+		;
+
+ssl		: '{' sslopts_l '}'
+		| sslopts
+		;
+
+sslopts_l	: sslopts comma sslopts_l
+		| sslopts
+		;
+
+sslopts		: CERTIFICATE STRING		{
+			free(srv_conf->ssl_cert_file);
+			if ((srv_conf->ssl_cert_file = strdup($2)) == NULL)
+				fatal("out of memory");
+			free($2);
+		}
+		| KEY STRING			{
+			free(srv_conf->ssl_key_file);
+			if ((srv_conf->ssl_key_file = strdup($2)) == NULL)
+				fatal("out of memory");
+			free($2);
+		}
+		| CIPHERS STRING		{
+			if (strlcpy(srv_conf->ssl_ciphers, $2,
+			    sizeof(srv_conf->ssl_ciphers)) >=
+			    sizeof(srv_conf->ssl_ciphers)) {
+				yyerror("ciphers too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+		}
+		;
+
+dirflags_l	: dirflags comma dirflags_l
+		| dirflags
+		;
+
+dirflags	: INDEX STRING		{
+			if (strlcpy(srv_conf->index, $2,
+			    sizeof(srv_conf->index)) >=
+			    sizeof(srv_conf->index)) {
+				yyerror("index file too long");
+				free($2);
+				YYERROR;
+			}
+			srv_conf->flags &= ~SRVFLAG_NO_INDEX;
+			srv_conf->flags |= SRVFLAG_INDEX;
+			free($2);
+		}
+		| NO INDEX		{
+			srv_conf->flags &= ~SRVFLAG_INDEX;
+			srv_conf->flags |= SRVFLAG_NO_INDEX;
+		}
+		| AUTO INDEX		{
+			srv_conf->flags &= ~SRVFLAG_NO_AUTO_INDEX;
+			srv_conf->flags |= SRVFLAG_AUTO_INDEX;
+		}
+		| NO AUTO INDEX		{
+			srv_conf->flags &= ~SRVFLAG_AUTO_INDEX;
+			srv_conf->flags |= SRVFLAG_NO_AUTO_INDEX;
+		}
+		;
+
+
+logformat	: LOG logflags
+		| LOG '{' logflags_l '}'
+		| NO LOG		{
+			srv_conf->flags &= ~SRVFLAG_LOG;
+			srv_conf->flags |= SRVFLAG_NO_LOG;
+		}
+		;
+
+logflags_l	: logflags comma logflags_l
+		| logflags
+		;
+
+
+logflags	: STYLE logstyle
+		| SYSLOG		{
+			srv_conf->flags &= ~SRVFLAG_NO_SYSLOG;
+			srv_conf->flags |= SRVFLAG_SYSLOG;
+		}
+		| NO SYSLOG		{
+			srv_conf->flags &= ~SRVFLAG_SYSLOG;
+			srv_conf->flags |= SRVFLAG_NO_SYSLOG;
+		}
+		| ACCESS STRING		{
+			if (strlcpy(srv_conf->accesslog, $2,
+			    sizeof(srv_conf->accesslog)) >=
+			    sizeof(srv_conf->accesslog)) {
+				yyerror("access log name too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+			srv_conf->flags |= SRVFLAG_ACCESS_LOG;
+		}
+		| ERR STRING		{
+			if (strlcpy(srv_conf->errorlog, $2,
+			    sizeof(srv_conf->errorlog)) >=
+			    sizeof(srv_conf->errorlog)) {
+				yyerror("error log name too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+			srv_conf->flags |= SRVFLAG_ERROR_LOG;
+		}
+		;
+
+logstyle	: COMMON		{
+			srv_conf->flags &= ~SRVFLAG_NO_LOG;
+			srv_conf->flags |= SRVFLAG_LOG;
+			srv_conf->logformat = LOG_FORMAT_COMMON;
+		}
+		| COMBINED		{
+			srv_conf->flags &= ~SRVFLAG_NO_LOG;
+			srv_conf->flags |= SRVFLAG_LOG;
+			srv_conf->logformat = LOG_FORMAT_COMBINED;
+		}
+		| CONNECTION		{
+			srv_conf->flags &= ~SRVFLAG_NO_LOG;
+			srv_conf->flags |= SRVFLAG_LOG;
+			srv_conf->logformat = LOG_FORMAT_CONNECTION;
+		}
+		;
+
+tcpip		: '{' tcpflags_l '}'
+		| tcpflags
+		;
+
+tcpflags_l	: tcpflags comma tcpflags_l
+		| tcpflags
+		;
+
+tcpflags	: SACK			{ srv_conf->tcpflags |= TCPFLAG_SACK; }
+		| NO SACK		{ srv_conf->tcpflags |= TCPFLAG_NSACK; }
+		| NODELAY		{
+			srv_conf->tcpflags |= TCPFLAG_NODELAY;
+		}
+		| NO NODELAY		{
+			srv_conf->tcpflags |= TCPFLAG_NNODELAY;
+		}
+		| BACKLOG NUMBER	{
+			if ($2 < 0 || $2 > SERVER_MAX_CLIENTS) {
+				yyerror("invalid backlog: %d", $2);
+				YYERROR;
+			}
+			srv_conf->tcpbacklog = $2;
+		}
+		| SOCKET BUFFER NUMBER	{
+			srv_conf->tcpflags |= TCPFLAG_BUFSIZ;
+			if ((srv_conf->tcpbufsiz = $3) < 0) {
+				yyerror("invalid socket buffer size: %d", $3);
+				YYERROR;
+			}
+		}
+		| IP STRING NUMBER	{
+			if ($3 < 0) {
+				yyerror("invalid ttl: %d", $3);
+				free($2);
+				YYERROR;
+			}
+			if (strcasecmp("ttl", $2) == 0) {
+				srv_conf->tcpflags |= TCPFLAG_IPTTL;
+				srv_conf->tcpipttl = $3;
+			} else if (strcasecmp("minttl", $2) == 0) {
+				srv_conf->tcpflags |= TCPFLAG_IPMINTTL;
+				srv_conf->tcpipminttl = $3;
+			} else {
+				yyerror("invalid TCP/IP flag: %s", $2);
 				free($2);
 				YYERROR;
 			}
@@ -286,7 +663,7 @@ mediaopts_l	: mediaopts_l mediaoptsl nl
 		| mediaoptsl optnl
 		;
 
-mediaoptsl	: STRING '/' STRING 			{
+mediaoptsl	: STRING '/' STRING	{
 			if (strlcpy(media.media_type, $1,
 			    sizeof(media.media_type)) >=
 			    sizeof(media.media_type) ||
@@ -316,6 +693,9 @@ medianamesl	: STRING				{
 				YYERROR;
 			}
 			free($1);
+
+			if (!loadcfg)
+				break;
 
 			if (media_add(conf->sc_mediatypes, &media) == NULL) {
 				yyerror("failed to add media type");
@@ -360,8 +740,20 @@ port		: PORT STRING {
 		}
 		;
 
-loglevel	: UPDATES		{ $$ = HTTPD_OPT_LOGUPDATE; }
-		| ALL			{ $$ = HTTPD_OPT_LOGALL; }
+timeout		: NUMBER
+		{
+			if ($1 < 0) {
+				yyerror("invalid timeout: %d\n", $1);
+				YYERROR;
+			}
+			$$.tv_sec = $1;
+			$$.tv_usec = 0;
+		}
+		;
+
+comma		: ','
+		| nl
+		| /* empty */
 		;
 
 optnl		: '\n' optnl
@@ -405,17 +797,45 @@ lookup(char *s)
 {
 	/* this has to be sorted always */
 	static const struct keywords keywords[] = {
-		{ "all",		ALL },
+		{ "access",		ACCESS },
+		{ "auto",		AUTO },
+		{ "backlog",		BACKLOG },
+		{ "body",		BODY },
+		{ "buffer",		BUFFER },
+		{ "certificate",	CERTIFICATE },
+		{ "chroot",		CHROOT },
+		{ "ciphers",		CIPHERS },
+		{ "combined",		COMBINED },
+		{ "common",		COMMON },
+		{ "connection",		CONNECTION },
+		{ "directory",		DIRECTORY },
+		{ "error",		ERR },
+		{ "fastcgi",		FCGI },
 		{ "include",		INCLUDE },
+		{ "index",		INDEX },
+		{ "ip",			IP },
+		{ "key",		KEY },
 		{ "listen",		LISTEN },
+		{ "location",		LOCATION },
 		{ "log",		LOG },
+		{ "max",		MAXIMUM },
+		{ "no",			NO },
+		{ "nodelay",		NODELAY },
 		{ "on",			ON },
 		{ "port",		PORT },
 		{ "prefork",		PREFORK },
+		{ "request",		REQUEST },
+		{ "requests",		REQUESTS },
 		{ "root",		ROOT },
+		{ "sack",		SACK },
 		{ "server",		SERVER },
-		{ "types",		TYPES },
-		{ "updates",		UPDATES }
+		{ "socket",		SOCKET },
+		{ "ssl",		SSL },
+		{ "style",		STYLE },
+		{ "syslog",		SYSLOG },
+		{ "tcp",		TCP },
+		{ "timeout",		TIMEOUT },
+		{ "types",		TYPES }
 	};
 	const struct keywords	*p;
 
@@ -841,7 +1261,7 @@ load_config(const char *filename, struct httpd *x_conf)
 				    m.media_name);
 				errors++;
 			}
-		}		
+		}
 	}
 
 	return (errors ? -1 : 0);

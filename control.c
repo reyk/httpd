@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.1 2014/07/12 23:34:54 reyk Exp $	*/
+/*	$OpenBSD: control.c,v 1.4 2014/08/04 15:49:28 reyk Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -16,8 +16,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/types.h>
 #include <sys/queue.h>
-#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -31,8 +31,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
-
-#include <openssl/ssl.h>
 
 #include "httpd.h"
 
@@ -271,6 +269,7 @@ control_dispatch_imsg(int fd, short event, void *arg)
 		switch (imsg.hdr.type) {
 		case IMSG_CTL_SHUTDOWN:
 		case IMSG_CTL_RELOAD:
+		case IMSG_CTL_REOPEN:
 			proc_forward_imsg(env->sc_ps, &imsg, PROC_PARENT, -1);
 			break;
 		case IMSG_CTL_NOTIFY:

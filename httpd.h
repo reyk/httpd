@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.15 2014/07/25 23:30:58 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.53 2014/08/13 16:04:28 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -26,6 +26,7 @@
 #include <sys/param.h>		/* MAXHOSTNAMELEN */
 #include <limits.h>
 #include <imsg.h>
+#include <ressl.h>
 
 #define CONF_FILE		"/etc/httpd.conf"
 #define HTTPD_SOCKET		"/var/run/httpd.sock"
@@ -33,6 +34,13 @@
 #define HTTPD_SERVERNAME	"OpenBSD httpd"
 #define HTTPD_DOCROOT		"/htdocs"
 #define HTTPD_INDEX		"index.html"
+#define HTTPD_FCGI_SOCKET	"/run/slowcgi.sock"
+#define HTTPD_LOGROOT		"/logs"
+#define HTTPD_ACCESS_LOG	"access.log"
+#define HTTPD_ERROR_LOG		"error.log"
+#define HTTPD_SSL_CERT		"/etc/ssl/server.crt"
+#define HTTPD_SSL_KEY		"/etc/ssl/private/server.key"
+#define HTTPD_SSL_CIPHERS	"HIGH:!aNULL"
 #define FD_RESERVE		5
 
 #define SERVER_MAX_CLIENTS	1024
@@ -41,6 +49,8 @@
 #define SERVER_NUMPROC		3
 #define SERVER_MAXPROC		32
 #define SERVER_MAXHEADERLENGTH	8192
+#define SERVER_MAXREQUESTS	100	/* max requests per connection */
+#define SERVER_MAXREQUESTBODY	1048576	/* 1M */
 #define SERVER_BACKLOG		10
 #define SERVER_OUTOF_FD_RETRIES	5
 
@@ -52,19 +62,7 @@
 #define CONFIG_SERVERS		0x02
 #define CONFIG_ALL		0xff
 
-#define TCPFLAG_NODELAY		0x01
-#define TCPFLAG_NNODELAY	0x02
-#define TCPFLAG_SACK		0x04
-#define TCPFLAG_NSACK		0x08
-#define TCPFLAG_BUFSIZ		0x10
-#define TCPFLAG_IPTTL		0x20
-#define TCPFLAG_IPMINTTL	0x40
-#define TCPFLAG_NSPLICE		0x80
-#define TCPFLAG_DEFAULT		0x00
-
-#define TCPFLAG_BITS						\
-	"\10\01NODELAY\02NO_NODELAY\03SACK\04NO_SACK"		\
-	"\05SOCKET_BUFFER_SIZE\06IP_TTL\07IP_MINTTL\10NO_SPLICE"
+#define FCGI_CONTENT_SIZE	65535
 
 enum httpchunk {
 	TOREAD_UNLIMITED		= -1,
@@ -189,20 +187,25 @@ enum imsg_type {
 	IMSG_CTL_NOTIFY,
 	IMSG_CTL_END,
 	IMSG_CTL_START,
+	IMSG_CTL_REOPEN,
 	IMSG_CFG_SERVER,
 	IMSG_CFG_MEDIA,
-	IMSG_CFG_DONE
+	IMSG_CFG_DONE,
+	IMSG_LOG_ACCESS,
+	IMSG_LOG_ERROR,
+	IMSG_LOG_OPEN
 };
 
 enum privsep_procid {
 	PROC_ALL	= -1,
 	PROC_PARENT	= 0,
 	PROC_SERVER,
+	PROC_LOGGER,
 	PROC_MAX
 } privsep_process;
 
 /* Attach the control socket to the following process */
-#define PROC_CONTROL	PROC_PARENT
+#define PROC_CONTROL	PROC_LOGGER
 
 struct privsep_pipes {
 	int				*pp_pipes[PROC_MAX];
@@ -230,6 +233,7 @@ struct privsep {
 	struct event			 ps_evsigchld;
 	struct event			 ps_evsighup;
 	struct event			 ps_evsigpipe;
+	struct event			 ps_evsigusr1;
 
 	int				 ps_noaction;
 	struct passwd			*ps_pw;
@@ -250,6 +254,12 @@ struct privsep_proc {
 	struct httpd		*p_env;
 };
 
+enum fcgistate {
+	FCGI_READ_HEADER,
+	FCGI_READ_CONTENT,
+	FCGI_READ_PADDING
+};
+
 struct client {
 	u_int32_t		 clt_id;
 	pid_t			 clt_pid;
@@ -262,19 +272,29 @@ struct client {
 	in_port_t		 clt_port;
 	struct sockaddr_storage	 clt_ss;
 	struct bufferevent	*clt_bev;
+	char			*clt_buf;
+	size_t			 clt_buflen;
 	struct evbuffer		*clt_output;
 	struct event		 clt_ev;
 	void			*clt_desc;
+	int			 clt_sndbufsiz;
 
 	int			 clt_fd;
-	struct bufferevent	*clt_file;
+	struct ressl		*clt_ressl_ctx;
+	struct bufferevent	*clt_srvbev;
 
 	off_t			 clt_toread;
 	size_t			 clt_headerlen;
-	int			 clt_persist;
+	u_int			 clt_persist;
 	int			 clt_line;
 	int			 clt_done;
+	int			 clt_chunk;
 	int			 clt_inflight;
+	enum fcgistate		 clt_fcgi_state;
+	int			 clt_fcgi_toread;
+	int			 clt_fcgi_padding_len;
+	int			 clt_fcgi_type;
+	struct evbuffer		*clt_srvevb;
 
 	struct evbuffer		*clt_log;
 	struct timeval		 clt_timeout;
@@ -286,15 +306,91 @@ struct client {
 };
 SPLAY_HEAD(client_tree, client);
 
+#define SRVFLAG_INDEX		0x0001
+#define SRVFLAG_NO_INDEX	0x0002
+#define SRVFLAG_AUTO_INDEX	0x0004
+#define SRVFLAG_NO_AUTO_INDEX	0x0008
+#define SRVFLAG_ROOT		0x0010
+#define SRVFLAG_LOCATION	0x0020
+#define SRVFLAG_FCGI		0x0040
+#define SRVFLAG_NO_FCGI		0x0080
+#define SRVFLAG_LOG		0x0100
+#define SRVFLAG_NO_LOG		0x0200
+#define SRVFLAG_SOCKET		0x0400
+#define SRVFLAG_SYSLOG		0x0800
+#define SRVFLAG_NO_SYSLOG	0x1000
+#define SRVFLAG_SSL		0x2000
+#define SRVFLAG_ACCESS_LOG	0x4000
+#define SRVFLAG_ERROR_LOG	0x8000
+
+#define SRVFLAG_BITS							\
+	"\10\01INDEX\02NO_INDEX\03AUTO_INDEX\04NO_AUTO_INDEX"		\
+	"\05ROOT\06LOCATION\07FCGI\10NO_FCGI\11LOG\12NO_LOG\13SOCKET"	\
+	"\14SYSLOG\15NO_SYSLOG\16SSL\17ACCESS_LOG\20ERROR_LOG"
+
+#define TCPFLAG_NODELAY		0x01
+#define TCPFLAG_NNODELAY	0x02
+#define TCPFLAG_SACK		0x04
+#define TCPFLAG_NSACK		0x08
+#define TCPFLAG_BUFSIZ		0x10
+#define TCPFLAG_IPTTL		0x20
+#define TCPFLAG_IPMINTTL	0x40
+#define TCPFLAG_NSPLICE		0x80
+#define TCPFLAG_DEFAULT		0x00
+
+#define TCPFLAG_BITS						\
+	"\10\01NODELAY\02NO_NODELAY\03SACK\04NO_SACK"		\
+	"\05SOCKET_BUFFER_SIZE\06IP_TTL\07IP_MINTTL\10NO_SPLICE"
+
+enum log_format {
+	LOG_FORMAT_COMMON,
+	LOG_FORMAT_COMBINED,
+	LOG_FORMAT_CONNECTION
+};
+
+struct log_file {
+	char			log_name[NAME_MAX];
+	int			log_fd;
+	u_int32_t		log_id;
+	TAILQ_ENTRY(log_file)	log_entry;
+};
+TAILQ_HEAD(log_files, log_file) log_files;
+
 struct server_config {
 	u_int32_t		 id;
-	u_int32_t		 flags;
 	char			 name[MAXHOSTNAMELEN];
-	char			 docroot[MAXPATHLEN];
+	char			 location[NAME_MAX];
+	char			 index[NAME_MAX];
+	char			 root[MAXPATHLEN];
+	char			 socket[MAXPATHLEN];
+	char			 accesslog[NAME_MAX];
+	char			 errorlog[NAME_MAX];
+
 	in_port_t		 port;
 	struct sockaddr_storage	 ss;
 	int			 prefixlen;
 	struct timeval		 timeout;
+	u_int32_t		 maxrequests;
+	size_t			 maxrequestbody;
+
+	char			*ssl_cert;
+	off_t			 ssl_cert_len;
+	char			*ssl_cert_file;
+	char			 ssl_ciphers[NAME_MAX];
+	char			*ssl_key;
+	off_t			 ssl_key_len;
+	char			*ssl_key_file;
+
+	u_int16_t		 flags;
+	u_int8_t		 tcpflags;
+	int			 tcpbufsiz;
+	int			 tcpbacklog;
+	u_int8_t		 tcpipttl;
+	u_int8_t		 tcpipminttl;
+
+	enum log_format		 logformat;
+	struct log_file		*logaccess;
+	struct log_file		*logerror;
 
 	TAILQ_ENTRY(server_config) entry;
 };
@@ -305,15 +401,12 @@ struct server {
 	struct server_config	 srv_conf;
 	struct serverhosts	 srv_hosts;
 
-	u_int8_t		 srv_tcpflags;
-	int			 srv_tcpbufsiz;
-	int			 srv_tcpbacklog;
-	u_int8_t		 srv_tcpipttl;
-	u_int8_t		 srv_tcpipminttl;
-
 	int			 srv_s;
 	struct event		 srv_ev;
 	struct event		 srv_evt;
+
+	struct ressl		 *srv_ressl_ctx;
+	struct ressl_config	 *srv_ressl_config;
 
 	struct client_tree	 srv_clients;
 };
@@ -335,6 +428,8 @@ struct httpd {
 	struct event		 sc_ev;
 	u_int16_t		 sc_prefork_server;
 	u_int16_t		 sc_id;
+	int			 sc_paused;
+	char			*sc_chroot;
 
 	struct serverlist	*sc_servers;
 	struct mediatypes	*sc_mediatypes;
@@ -345,9 +440,6 @@ struct httpd {
 
 #define HTTPD_OPT_VERBOSE		0x01
 #define HTTPD_OPT_NOACTION		0x04
-#define HTTPD_OPT_LOGUPDATE		0x08
-#define HTTPD_OPT_LOGNOTIFY		0x10
-#define HTTPD_OPT_LOGALL		0x18
 
 /* control.c */
 int	 control_init(struct privsep *, struct control_sock *);
@@ -368,14 +460,20 @@ int	 cmdline_symset(char *);
 
 /* server.c */
 pid_t	 server(struct privsep *, struct privsep_proc *);
+int	 server_ssl_load_keypair(struct server *);
 int	 server_privinit(struct server *);
 void	 server_purge(struct server *);
 int	 server_socket_af(struct sockaddr_storage *, in_port_t);
 in_port_t
 	 server_socket_getport(struct sockaddr_storage *);
+int	 server_socket_connect(struct sockaddr_storage *, in_port_t,
+	    struct server_config *);
 void	 server_write(struct bufferevent *, void *);
 void	 server_read(struct bufferevent *, void *);
 void	 server_error(struct bufferevent *, short, void *);
+void	 server_log(struct client *, const char *);
+void	 server_sendlog(struct server_config *, int, const char *, ...)
+	    __attribute__((__format__ (printf, 3, 4)));
 void	 server_close(struct client *, const char *);
 void	 server_dump(struct client *, const void *, size_t);
 int	 server_client_cmp(struct client *, struct client *);
@@ -389,6 +487,10 @@ int	 server_bufferevent_write(struct client *, void *, size_t);
 void	 server_inflight_dec(struct client *, const char *);
 struct server *
 	 server_byaddr(struct sockaddr *, in_port_t);
+struct server_config *
+	 serverconfig_byid(u_int32_t);
+int	 server_foreach(int (*)(struct server *,
+	    struct server_config *, void *), void *);
 
 SPLAY_PROTOTYPE(client_tree, client, clt_nodes, server_client_cmp);
 
@@ -405,19 +507,29 @@ const char
 	*server_httperror_byid(u_int);
 void	 server_read_httpcontent(struct bufferevent *, void *);
 void	 server_read_httpchunks(struct bufferevent *, void *);
-int	 server_writeheader_kv(struct client *, struct kv *);
-int	 server_writeheader_http(struct client *);
+int	 server_writeheader_http(struct client *clt, struct kv *, void *);
+int	 server_headers(struct client *,
+	    int (*)(struct client *, struct kv *, void *), void *);
 int	 server_writeresponse_http(struct client *);
 int	 server_response_http(struct client *, u_int, struct media_type *,
 	    size_t);
 void	 server_reset_http(struct client *);
 void	 server_close_http(struct client *);
 int	 server_response(struct httpd *, struct client *);
+struct server_config *
+	 server_getlocation(struct client *, const char *);
 const char *
 	 server_http_host(struct sockaddr_storage *, char *, size_t);
+void	 server_http_date(char *, size_t);
+int	 server_log_http(struct client *, u_int, size_t);
 
 /* server_file.c */
 int	 server_file(struct httpd *, struct client *);
+void	 server_file_error(struct bufferevent *, short, void *);
+
+/* server_fcgi.c */
+int	 server_fcgi(struct httpd *, struct client *);
+int	 fcgi_add_stdin(struct client *, struct evbuffer *);
 
 /* httpd.c */
 void		 event_again(struct event *, int, short,
@@ -425,6 +537,7 @@ void		 event_again(struct event *, int, short,
 		    struct timeval *, struct timeval *, void *);
 const char	*canonicalize_host(const char *, char *, size_t);
 const char	*canonicalize_path(const char *, char *, size_t);
+size_t		 path_info(char *);
 void		 imsg_event_add(struct imsgev *);
 int		 imsg_compose_event(struct imsgev *, u_int16_t, u_int32_t,
 		    pid_t, int, void *, u_int16_t);
@@ -435,7 +548,7 @@ int		 sockaddr_cmp(struct sockaddr *, struct sockaddr *, int);
 struct in6_addr *prefixlen2mask6(u_int8_t, u_int32_t *);
 u_int32_t	 prefixlen2mask(u_int8_t);
 int		 accept_reserve(int, struct sockaddr *, socklen_t *, int,
-		     volatile int *);
+		    volatile int *);
 struct kv	*kv_add(struct kvtree *, char *, char *);
 int		 kv_set(struct kv *, char *, ...);
 int		 kv_setkey(struct kv *, char *, ...);
@@ -507,5 +620,9 @@ int	 config_setserver(struct httpd *, struct server *);
 int	 config_getserver(struct httpd *, struct imsg *);
 int	 config_setmedia(struct httpd *, struct media_type *);
 int	 config_getmedia(struct httpd *, struct imsg *);
+
+/* logger.c */
+pid_t	 logger(struct privsep *, struct privsep_proc *);
+int	 logger_open_priv(struct imsg *);
 
 #endif /* _HTTPD_H */

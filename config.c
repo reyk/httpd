@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.5 2014/07/25 23:30:58 reyk Exp $	*/
+/*	$OpenBSD: config.c,v 1.21 2014/08/06 18:21:14 reyk Exp $	*/
 
 /*
  * Copyright (c) 2011 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -36,13 +36,12 @@
 #include <event.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <netdb.h>
 #include <string.h>
 #include <ifaddrs.h>
-
-#include <openssl/ssl.h>
 
 #include "httpd.h"
 
@@ -61,6 +60,7 @@ config_init(struct httpd *env)
 
 		ps->ps_what[PROC_PARENT] = CONFIG_ALL;
 		ps->ps_what[PROC_SERVER] = CONFIG_SERVERS|CONFIG_MEDIA;
+		ps->ps_what[PROC_LOGGER] = CONFIG_SERVERS;
 	}
 
 	/* Other configuration */
@@ -184,8 +184,17 @@ config_setserver(struct httpd *env, struct server *srv)
 		c = 0;
 		iov[c].iov_base = &s;
 		iov[c++].iov_len = sizeof(s);
+		if (srv->srv_conf.ssl_cert_len != 0) {
+			iov[c].iov_base = srv->srv_conf.ssl_cert;
+			iov[c++].iov_len = srv->srv_conf.ssl_cert_len;
+		}
+		if (srv->srv_conf.ssl_key_len != 0) {
+			iov[c].iov_base = srv->srv_conf.ssl_key;
+			iov[c++].iov_len = srv->srv_conf.ssl_key_len;
+		}
 
-		if (id == PROC_SERVER) {
+		if (id == PROC_SERVER &&
+		    (srv->srv_conf.flags & SRVFLAG_LOCATION) == 0) {
 			/* XXX imsg code will close the fd after 1st call */
 			n = -1;
 			proc_range(ps, id, &n, &m);
@@ -216,6 +225,7 @@ config_getserver_config(struct httpd *env, struct server *srv,
 #endif
 	struct server_config	*srv_conf;
 	u_int8_t		*p = imsg->data;
+	u_int			 f;
 
 	if ((srv_conf = calloc(1, sizeof(*srv_conf))) == NULL)
 		return (-1);
@@ -223,11 +233,85 @@ config_getserver_config(struct httpd *env, struct server *srv,
 	IMSG_SIZE_CHECK(imsg, srv_conf);
 	memcpy(srv_conf, p, sizeof(*srv_conf));
 
-	TAILQ_INSERT_TAIL(&srv->srv_hosts, srv_conf, entry);
+	if (srv_conf->flags & SRVFLAG_LOCATION) {
+		/* Inherit configuration from the parent */
+		f = SRVFLAG_INDEX|SRVFLAG_NO_INDEX;
+		if ((srv_conf->flags & f) == 0) {
+			srv_conf->flags |= srv->srv_conf.flags & f;
+			(void)strlcpy(srv_conf->index, srv->srv_conf.index,
+			    sizeof(srv_conf->index));
+		}
 
-	DPRINTF("%s: %s %d received configuration \"%s\", parent \"%s\"",
-	    __func__, ps->ps_title[privsep_process], ps->ps_instance,
-	    srv_conf->name, srv->srv_conf.name);
+		f = SRVFLAG_AUTO_INDEX|SRVFLAG_NO_AUTO_INDEX;
+		if ((srv_conf->flags & f) == 0)
+			srv_conf->flags |= srv->srv_conf.flags & f;
+
+		f = SRVFLAG_SOCKET|SRVFLAG_FCGI;
+		if ((srv_conf->flags & f) == SRVFLAG_FCGI) {
+			srv_conf->flags |= f;
+			(void)strlcpy(srv_conf->socket, HTTPD_FCGI_SOCKET,
+			    sizeof(srv_conf->socket));
+		}
+
+		f = SRVFLAG_ROOT;
+		if ((srv_conf->flags & f) == 0) {
+			srv_conf->flags |= srv->srv_conf.flags & f;
+			(void)strlcpy(srv_conf->root, srv->srv_conf.root,
+			    sizeof(srv_conf->root));
+		}
+
+		f = SRVFLAG_FCGI|SRVFLAG_NO_FCGI;
+		if ((srv_conf->flags & f) == 0)
+			srv_conf->flags |= srv->srv_conf.flags & f;
+
+		f = SRVFLAG_LOG|SRVFLAG_NO_LOG;
+		if ((srv_conf->flags & f) == 0) {
+			srv_conf->flags |= srv->srv_conf.flags & f;
+			srv_conf->logformat = srv->srv_conf.logformat;
+		}
+
+		f = SRVFLAG_SYSLOG|SRVFLAG_NO_SYSLOG;
+		if ((srv_conf->flags & f) == 0)
+			srv_conf->flags |= srv->srv_conf.flags & f;
+
+		f = SRVFLAG_SSL;
+		srv_conf->flags |= srv->srv_conf.flags & f;
+
+		f = SRVFLAG_ACCESS_LOG;
+		if ((srv_conf->flags & f) == 0) {
+			srv_conf->flags |= srv->srv_conf.flags & f;
+			(void)strlcpy(srv_conf->accesslog,
+			    srv->srv_conf.accesslog,
+			    sizeof(srv_conf->accesslog));
+		}
+
+		f = SRVFLAG_ERROR_LOG;
+		if ((srv_conf->flags & f) == 0) {
+			srv_conf->flags |= srv->srv_conf.flags & f;
+			(void)strlcpy(srv_conf->errorlog,
+			    srv->srv_conf.errorlog,
+			    sizeof(srv_conf->errorlog));
+		}
+
+		memcpy(&srv_conf->timeout, &srv->srv_conf.timeout,
+		    sizeof(srv_conf->timeout));
+		srv_conf->maxrequests = srv->srv_conf.maxrequests;
+		srv_conf->maxrequestbody = srv->srv_conf.maxrequestbody;
+
+		DPRINTF("%s: %s %d location \"%s\", "
+		    "parent \"%s\", flags: %s",
+		    __func__, ps->ps_title[privsep_process], ps->ps_instance,
+		    srv_conf->location, srv->srv_conf.name,
+		    printb_flags(srv_conf->flags, SRVFLAG_BITS));
+	} else {
+		/* Add a new "virtual" server */
+		DPRINTF("%s: %s %d server \"%s\", parent \"%s\", flags: %s",
+		    __func__, ps->ps_title[privsep_process], ps->ps_instance,
+		    srv_conf->name, srv->srv_conf.name,
+		    printb_flags(srv_conf->flags, SRVFLAG_BITS));
+	}
+
+	TAILQ_INSERT_TAIL(&srv->srv_hosts, srv_conf, entry);
 
 	return (0);
 }
@@ -238,7 +322,7 @@ config_getserver(struct httpd *env, struct imsg *imsg)
 #ifdef DEBUG
 	struct privsep		*ps = env->sc_ps;
 #endif
-	struct server		*srv;
+	struct server		*srv = NULL;
 	struct server_config	 srv_conf;
 	u_int8_t		*p = imsg->data;
 	size_t			 s;
@@ -247,14 +331,23 @@ config_getserver(struct httpd *env, struct imsg *imsg)
 	memcpy(&srv_conf, p, sizeof(srv_conf));
 	s = sizeof(srv_conf);
 
+	if ((u_int)(IMSG_DATA_SIZE(imsg) - s) <
+	    (srv_conf.ssl_cert_len + srv_conf.ssl_key_len)) {
+		log_debug("%s: invalid message length", __func__);
+		goto fail;
+	}
+
 	/* Check if server with matching listening socket already exists */
 	if ((srv = server_byaddr((struct sockaddr *)
 	    &srv_conf.ss, srv_conf.port)) != NULL) {
 		/* Add "host" to existing listening server */
-		close(imsg->fd);
-		return (config_getserver_config(env,
-		    srv, imsg));
+		if (imsg->fd != -1)
+			close(imsg->fd);
+		return (config_getserver_config(env, srv, imsg));
 	}
+
+	if (srv_conf.flags & SRVFLAG_LOCATION)
+		fatalx("invalid location");
 
 	/* Otherwise create a new server */
 	if ((srv = calloc(1, sizeof(*srv))) == NULL) {
@@ -271,11 +364,32 @@ config_getserver(struct httpd *env, struct imsg *imsg)
 	TAILQ_INSERT_TAIL(&srv->srv_hosts, &srv->srv_conf, entry);
 	TAILQ_INSERT_TAIL(env->sc_servers, srv, srv_entry);
 
-	DPRINTF("%s: %s %d received configuration \"%s\"", __func__,
+	DPRINTF("%s: %s %d configuration \"%s\", flags: %s", __func__,
 	    ps->ps_title[privsep_process], ps->ps_instance,
-	    srv->srv_conf.name);
+	    srv->srv_conf.name,
+	    printb_flags(srv->srv_conf.flags, SRVFLAG_BITS));
+
+	if (srv->srv_conf.ssl_cert_len != 0) {
+		if ((srv->srv_conf.ssl_cert = get_data(p + s,
+		    srv->srv_conf.ssl_cert_len)) == NULL)
+			goto fail;
+		s += srv->srv_conf.ssl_cert_len;
+	}
+	if (srv->srv_conf.ssl_key_len != 0) {
+		if ((srv->srv_conf.ssl_key = get_data(p + s,
+		    srv->srv_conf.ssl_key_len)) == NULL)
+			goto fail;
+		s += srv->srv_conf.ssl_key_len;
+	}
 
 	return (0);
+
+ fail:
+	free(srv->srv_conf.ssl_cert);
+	free(srv->srv_conf.ssl_key);
+	free(srv);
+
+	return (-1);
 }
 
 int
