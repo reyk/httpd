@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_fcgi.c,v 1.34 2014/08/21 19:23:10 chrisz Exp $	*/
+/*	$OpenBSD: server_fcgi.c,v 1.38 2014/09/02 16:20:41 reyk Exp $	*/
 
 /*
  * Copyright (c) 2014 Florian Obser <florian@openbsd.org>
@@ -87,16 +87,17 @@ struct server_fcgi_param {
 int	server_fcgi_header(struct client *, u_int);
 void	server_fcgi_read(struct bufferevent *, void *);
 int	server_fcgi_writeheader(struct client *, struct kv *, void *);
+int	server_fcgi_writechunk(struct client *);
+int	server_fcgi_getheaders(struct client *);
 int	fcgi_add_param(struct server_fcgi_param *, const char *, const char *,
 	    struct client *);
-int	get_status(struct evbuffer *);
 
 int
 server_fcgi(struct httpd *env, struct client *clt)
 {
 	struct server_fcgi_param	 param;
 	struct server_config		*srv_conf = clt->clt_srv_conf;
-	struct http_descriptor		*desc = clt->clt_desc;
+	struct http_descriptor		*desc = clt->clt_descreq;
 	struct fcgi_record_header	*h;
 	struct fcgi_begin_request_body	*begin;
 	char				 hbuf[MAXHOSTNAMELEN];
@@ -249,7 +250,7 @@ server_fcgi(struct httpd *env, struct client *clt)
 	}
 
 	/* Add HTTP_* headers */
-	if (server_headers(clt, server_fcgi_writeheader, &param) == -1) {
+	if (server_headers(clt, desc, server_fcgi_writeheader, &param) == -1) {
 		errstr = "failed to encode param";
 		goto fail;
 	}
@@ -347,11 +348,14 @@ server_fcgi(struct httpd *env, struct client *clt)
 		fcgi_add_stdin(clt, NULL);
 	}
 
-	/*
-	 * persist is not supported yet because we don't get the
-	 * Content-Length from slowcgi and don't support chunked encoding.
-	 */
-	clt->clt_persist = 0;
+	if (strcmp(desc->http_version, "HTTP/1.1") == 0) {
+		clt->clt_fcgi_chunked = 1;
+	} else {
+		/* HTTP/1.0 does not support chunked encoding */
+		clt->clt_fcgi_chunked = 0;
+		clt->clt_persist = 0;
+	}
+	clt->clt_fcgi_end = 0;
 	clt->clt_done = 0;
 
 	free(script);
@@ -454,12 +458,13 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 	char				*ptr;
 
 	do {
-		len = bufferevent_read(bev, &buf, clt->clt_fcgi_toread);
+		len = bufferevent_read(bev, buf, clt->clt_fcgi_toread);
 		/* XXX error handling */
-		evbuffer_add(clt->clt_srvevb, &buf, len);
+		evbuffer_add(clt->clt_srvevb, buf, len);
 		clt->clt_fcgi_toread -= len;
-		DPRINTF("%s: len: %lu toread: %d state: %d", __func__, len,
-		    clt->clt_fcgi_toread, clt->clt_fcgi_state);
+		DPRINTF("%s: len: %lu toread: %d state: %d type: %d",
+		    __func__, len, clt->clt_fcgi_toread,
+		    clt->clt_fcgi_state, clt->clt_fcgi_type);
 
 		if (clt->clt_fcgi_toread != 0)
 			return;
@@ -488,9 +493,10 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 
 			/* fallthrough if content_len == 0 */
 		case FCGI_READ_CONTENT:
-			if (clt->clt_fcgi_type == FCGI_STDERR &&
-			    EVBUFFER_LENGTH(clt->clt_srvevb) > 0) {
-				if ((ptr = get_string(
+			switch (clt->clt_fcgi_type) {
+			case FCGI_STDERR:
+				if (EVBUFFER_LENGTH(clt->clt_srvevb) > 0 &&
+				    (ptr = get_string(
 				    EVBUFFER_DATA(clt->clt_srvevb),
 				    EVBUFFER_LENGTH(clt->clt_srvevb)))
 				    != NULL) {
@@ -498,14 +504,27 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 					    IMSG_LOG_ERROR, "%s", ptr);
 					free(ptr);
 				}
-			}
-			if (clt->clt_fcgi_type == FCGI_STDOUT &&
-			    EVBUFFER_LENGTH(clt->clt_srvevb) > 0) {
-				if (++clt->clt_chunk == 1)
-					server_fcgi_header(clt,
-					    get_status(clt->clt_srvevb));
-				server_bufferevent_write_buffer(clt,
-				    clt->clt_srvevb);
+				break;
+			case FCGI_STDOUT:
+				if (++clt->clt_chunk == 1) {
+					if (server_fcgi_header(clt,
+					    server_fcgi_getheaders(clt))
+					    == -1) {
+						server_abort_http(clt, 500,
+						    "malformed fcgi headers");
+						return;
+					}
+					if (!EVBUFFER_LENGTH(clt->clt_srvevb))
+						break;
+				}
+				/* FALLTHROUGH */
+			case FCGI_END_REQUEST:
+				if (server_fcgi_writechunk(clt) == -1) {
+					server_abort_http(clt, 500,
+					    "encoding error");
+					return;
+				}
+				break;
 			}
 			evbuffer_drain(clt->clt_srvevb,
 			    EVBUFFER_LENGTH(clt->clt_srvevb));
@@ -533,9 +552,11 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 int
 server_fcgi_header(struct client *clt, u_int code)
 {
-	struct http_descriptor	*desc = clt->clt_desc;
+	struct http_descriptor	*desc = clt->clt_descreq;
+	struct http_descriptor	*resp = clt->clt_descresp;
 	const char		*error;
 	char			 tmbuf[32];
+	struct kv		*kv, key;
 
 	if (desc == NULL || (error = server_httperror_byid(code)) == NULL)
 		return (-1);
@@ -543,34 +564,49 @@ server_fcgi_header(struct client *clt, u_int code)
 	if (server_log_http(clt, code, 0) == -1)
 		return (-1);
 
-	kv_purge(&desc->http_headers);
-
 	/* Add error codes */
-	if (kv_setkey(&desc->http_pathquery, "%lu", code) == -1 ||
-	    kv_set(&desc->http_pathquery, "%s", error) == -1)
+	if (kv_setkey(&resp->http_pathquery, "%lu", code) == -1 ||
+	    kv_set(&resp->http_pathquery, "%s", error) == -1)
 		return (-1);
 
 	/* Add headers */
-	if (kv_add(&desc->http_headers, "Server", HTTPD_SERVERNAME) == NULL)
+	if (kv_add(&resp->http_headers, "Server", HTTPD_SERVERNAME) == NULL)
 		return (-1);
+
+	/* Set chunked encoding */
+	if (clt->clt_fcgi_chunked) {
+		/* XXX Should we keep and handle Content-Length instead? */
+		key.kv_key = "Content-Length";
+		if ((kv = kv_find(&resp->http_headers, &key)) != NULL)
+			kv_delete(&resp->http_headers, kv);
+
+		/*
+		 * XXX What if the FastCGI added some kind of Transfer-Encoding?
+		 * XXX like gzip, deflate or even "chunked"?
+		 */
+		if (kv_add(&resp->http_headers,
+		    "Transfer-Encoding", "chunked") == NULL)
+			return (-1);
+	}
 
 	/* Is it a persistent connection? */
 	if (clt->clt_persist) {
-		if (kv_add(&desc->http_headers,
+		if (kv_add(&resp->http_headers,
 		    "Connection", "keep-alive") == NULL)
 			return (-1);
-	} else if (kv_add(&desc->http_headers, "Connection", "close") == NULL)
+	} else if (kv_add(&resp->http_headers, "Connection", "close") == NULL)
 		return (-1);
 
 	/* Date header is mandatory and should be added as late as possible */
 	if (server_http_time(time(NULL), tmbuf, sizeof(tmbuf)) <= 0 ||
-	    kv_add(&desc->http_headers, "Date", tmbuf) == NULL)
+	    kv_add(&resp->http_headers, "Date", tmbuf) == NULL)
 		return (-1);
 
 	/* Write initial header (fcgi might append more) */
 	if (server_writeresponse_http(clt) == -1 ||
 	    server_bufferevent_print(clt, "\r\n") == -1 ||
-	    server_headers(clt, server_writeheader_http, NULL) == -1)
+	    server_headers(clt, resp, server_writeheader_http, NULL) == -1 ||
+	    server_bufferevent_print(clt, "\r\n") == -1)
 		return (-1);
 
 	return (0);
@@ -618,26 +654,65 @@ server_fcgi_writeheader(struct client *clt, struct kv *hdr, void *arg)
 }
 
 int
-get_status(struct evbuffer *bev)
+server_fcgi_writechunk(struct client *clt)
 {
-	int code;
-	char *statusline, *tok;
-	const char *errstr;
+	struct evbuffer *evb = clt->clt_srvevb;
+	size_t		 len;
 
-	/* XXX This is a hack. We need to parse the response header. */
-	code = 200;
-	if (strncmp(EVBUFFER_DATA(bev), "Status: ", strlen("Status: ")) == 0) {
-		statusline = get_string(EVBUFFER_DATA(bev),
-		    EVBUFFER_LENGTH(bev));
-		if (strtok(statusline, " ") != NULL) {
-			if ((tok = strtok(NULL, " ")) != NULL) {
-				code = (int) strtonum(tok, 100, 600, &errstr);
-				if (errstr != NULL || server_httperror_byid(
-				   code) == NULL)
-					code = 200;
-			}
+	if (clt->clt_fcgi_type == FCGI_END_REQUEST) {
+		len = 0;
+	} else
+		len = EVBUFFER_LENGTH(evb);
+
+	/* If len is 0, make sure to write the end marker only once */
+	if (len == 0 && clt->clt_fcgi_end++)
+		return (0);
+
+	if (clt->clt_fcgi_chunked) {
+		if (server_bufferevent_printf(clt, "%zx\r\n", len) == -1 ||
+		    server_bufferevent_write_chunk(clt, evb, len) == -1 ||
+		    server_bufferevent_print(clt, "\r\n") == -1)
+			return (-1);
+	} else
+		return (server_bufferevent_write_buffer(clt, evb));
+
+	return (0);
+}
+
+int
+server_fcgi_getheaders(struct client *clt)
+{
+	struct http_descriptor	*resp = clt->clt_descresp;
+	struct evbuffer		*evb = clt->clt_srvevb;
+	int			 code = 200;
+	char			*line, *key, *value;
+	const char		*errstr;
+
+	while ((line = evbuffer_getline(evb)) != NULL && *line != '\0') {
+		key = line;
+
+		if ((value = strchr(key, ':')) == NULL)
+			break;
+		if (*value == ':') {
+			*value++ = '\0';
+			value += strspn(value, " \t");
+		} else {
+			*value++ = '\0';
 		}
-		free(statusline);
+
+		DPRINTF("%s: %s: %s", __func__, key, value);
+
+		if (strcasecmp("Status", key) == 0) {
+			value[strcspn(value, " \t")] = '\0';
+			code = (int)strtonum(value, 100, 600, &errstr);
+			if (errstr != NULL || server_httperror_byid(
+			    code) == NULL)
+				code = 200;
+		} else {
+			(void)kv_add(&resp->http_headers, key, value);
+		}
+		free(line);
 	}
-	return code;
+
+	return (code);
 }

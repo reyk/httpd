@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.39 2014/08/06 18:38:11 reyk Exp $	*/
+/*	$OpenBSD: server.c,v 1.42 2014/09/05 10:04:20 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -285,8 +285,7 @@ server_purge(struct server *srv)
 
 		/* It might point to our own "default" entry */
 		if (srv_conf != &srv->srv_conf) {
-			free(srv_conf->ssl_cert);
-			free(srv_conf->ssl_key);
+			serverconfig_free(srv_conf);
 			free(srv_conf);
 		}
 	}
@@ -295,6 +294,22 @@ server_purge(struct server *srv)
 	ressl_free(srv->srv_ressl_ctx);
 
 	free(srv);
+}
+
+void
+serverconfig_free(struct server_config *srv_conf)
+{
+	free(srv_conf->ssl_cert_file);
+	free(srv_conf->ssl_cert);
+	free(srv_conf->ssl_key_file);
+	free(srv_conf->ssl_key);
+}
+
+void
+serverconfig_reset(struct server_config *srv_conf)
+{
+	srv_conf->ssl_cert_file = srv_conf->ssl_cert =
+	    srv_conf->ssl_key_file = srv_conf->ssl_key = NULL;
 }
 
 struct server *
@@ -750,20 +765,29 @@ void
 server_error(struct bufferevent *bev, short error, void *arg)
 {
 	struct client		*clt = arg;
+	struct evbuffer		*dst;
 
 	if (error & EVBUFFER_TIMEOUT) {
 		server_close(clt, "buffer event timeout");
-		return;
-	}
-	if (error & EVBUFFER_ERROR && errno == EFBIG) {
-		bufferevent_enable(bev, EV_READ);
 		return;
 	}
 	if (error & (EVBUFFER_READ|EVBUFFER_WRITE|EVBUFFER_EOF)) {
 		bufferevent_disable(bev, EV_READ|EV_WRITE);
 
 		clt->clt_done = 1;
+
+		dst = EVBUFFER_OUTPUT(clt->clt_bev);
+		if (EVBUFFER_LENGTH(dst)) {
+			/* Finish writing all data first */
+			bufferevent_enable(clt->clt_bev, EV_WRITE);
+			return;
+		}
+
 		server_close(clt, "done");
+		return;
+	}
+	if (error & EVBUFFER_ERROR && errno == EFBIG) {
+		bufferevent_enable(bev, EV_READ);
 		return;
 	}
 	server_close(clt, "buffer event error");
@@ -1109,6 +1133,26 @@ server_bufferevent_add(struct event *ev, int timeout)
 	}
 
 	return (event_add(ev, ptv));
+}
+
+int
+server_bufferevent_printf(struct client *clt, const char *fmt, ...)
+{
+	int	 ret;
+	va_list	 ap;
+	char	*str;
+
+	va_start(ap, fmt);
+	ret = vasprintf(&str, fmt, ap);
+	va_end(ap);
+
+	if (ret == -1)
+		return (ret);
+
+	ret = server_bufferevent_print(clt, str);
+	free(str);
+
+	return (ret);
 }
 
 int

@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.19 2014/08/13 16:04:28 reyk Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.21 2014/09/05 10:04:20 reyk Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -289,9 +289,19 @@ parent_configure(struct httpd *env)
 			fatal("send media");
 	}
 
+	/* First send the servers... */
 	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
+		if (srv->srv_conf.flags & SRVFLAG_LOCATION)
+			continue;
 		if (config_setserver(env, srv) == -1)
 			fatal("send server");
+	}
+	/* ...and now send the locations */
+	TAILQ_FOREACH(srv, env->sc_servers, srv_entry) {
+		if ((srv->srv_conf.flags & SRVFLAG_LOCATION) == 0)
+			continue;
+		if (config_setserver(env, srv) == -1)
+			fatal("send location");
 	}
 
 	/* The servers need to reload their config. */
@@ -628,6 +638,40 @@ socket_rlimit(int maxfd)
 		rl.rlim_cur = MAX(rl.rlim_max, (rlim_t)maxfd);
 	if (setrlimit(RLIMIT_NOFILE, &rl) == -1)
 		fatal("socket_rlimit: failed to set resource limit");
+}
+
+char *
+evbuffer_getline(struct evbuffer *evb)
+{
+	u_int8_t	*ptr = EVBUFFER_DATA(evb);
+	size_t		 len = EVBUFFER_LENGTH(evb);
+	char		*str;
+	u_int		 i;
+
+	/* Safe version of evbuffer_readline() */
+	if ((str = get_string(ptr, len)) == NULL)
+		return (NULL);
+
+	for (i = 0; str[i] != '\0'; i++) {
+		if (str[i] == '\r' || str[i] == '\n')
+			break;
+	}
+
+	if (i == len) {
+		free(str);
+		return (NULL);
+	}
+	
+	str[i] = '\0';
+
+	if ((i + 1) < len) {
+		if (ptr[i] == '\r' && ptr[i + 1] == '\n')
+			i++;
+	}
+
+	evbuffer_drain(evb, ++i);
+
+	return (str);
 }
 
 char *
