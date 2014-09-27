@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.48 2014/09/05 15:06:05 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.50 2014/09/15 08:00:27 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -229,18 +229,20 @@ server_read_http(struct bufferevent *bev, void *arg)
 				goto fail;
 			}
 			desc->http_version = strchr(desc->http_path, ' ');
-			if (desc->http_version != NULL)
-				*desc->http_version++ = '\0';
+			if (desc->http_version == NULL) {
+				free(line);
+				goto fail;
+			}
+			*desc->http_version++ = '\0';
 			desc->http_query = strchr(desc->http_path, '?');
 			if (desc->http_query != NULL)
 				*desc->http_query++ = '\0';
 
 			/*
 			 * Have to allocate the strings because they could
-			 * be changed independetly by the filters later.
+			 * be changed independently by the filters later.
 			 */
-			if (desc->http_version != NULL &&
-			    (desc->http_version =
+			if ((desc->http_version =
 			    strdup(desc->http_version)) == NULL) {
 				free(line);
 				goto fail;
@@ -609,6 +611,55 @@ server_http_host(struct sockaddr_storage *ss, char *buf, size_t len)
 	return (buf);
 }
 
+char *
+server_http_parsehost(char *host, char *buf, size_t len, int *portval)
+{
+	char		*start, *end, *port;
+	const char	*errstr = NULL;
+
+	if (strlcpy(buf, host, len) >= len) {
+		log_debug("%s: host name too long", __func__);
+		return (NULL);
+	}
+
+	start = buf;
+	end = port = NULL;
+
+	if (*start == '[' && (end = strchr(start, ']')) != NULL) {
+		/* Address enclosed in [] with port, eg. [2001:db8::1]:80 */
+		start++;
+		*end++ = '\0';
+		if ((port = strchr(end, ':')) == NULL || *port == '\0')
+			port = NULL;
+		else
+			port++;
+		memmove(buf, start, strlen(start) + 1);
+	} else if ((end = strchr(start, ':')) != NULL) {
+		/* Name or address with port, eg. www.example.com:80 */
+		*end++ = '\0';
+		port = end;
+	} else {
+		/* Name or address with default port, eg. www.example.com */
+		port = NULL;
+	}
+
+	if (port != NULL) {
+		/* Save the requested port */
+		*portval = strtonum(port, 0, 0xffff, &errstr);
+		if (errstr != NULL) {
+			log_debug("%s: invalid port: %s", __func__,
+			    strerror(errno));
+			return (NULL);
+		}
+		*portval = htons(*portval);
+	} else {
+		/* Port not given, indicate the default port */
+		*portval = -1;
+	}
+
+	return (start);
+}
+
 void
 server_abort_http(struct client *clt, u_int code, const char *msg)
 {
@@ -724,6 +775,8 @@ server_response(struct httpd *httpd, struct client *clt)
 	struct server		*srv = clt->clt_srv;
 	struct server_config	*srv_conf = &srv->srv_conf;
 	struct kv		*kv, key, *host;
+	int			 portval = -1;
+	char			*hostval;
 
 	/* Canonicalize the request path */
 	if (desc->http_path == NULL ||
@@ -768,17 +821,25 @@ server_response(struct httpd *httpd, struct client *clt)
 	 * XXX the Host can also appear in the URL path.
 	 */
 	if (host != NULL) {
-		/* XXX maybe better to turn srv_hosts into a tree */
+		if ((hostval = server_http_parsehost(host->kv_value,
+		    hostname, sizeof(hostname), &portval)) == NULL)
+			goto fail;
+
 		TAILQ_FOREACH(srv_conf, &srv->srv_hosts, entry) {
 #ifdef DEBUG
 			if ((srv_conf->flags & SRVFLAG_LOCATION) == 0) {
-				DPRINTF("%s: virtual host \"%s\" host \"%s\"",
-				    __func__, srv_conf->name, host->kv_value);
+				DPRINTF("%s: virtual host \"%s:%u\""
+				    " host \"%s\" (\"%s\")",
+				    __func__, srv_conf->name,
+				    ntohs(srv_conf->port), host->kv_value,
+				    hostname);
 			}
 #endif
 			if ((srv_conf->flags & SRVFLAG_LOCATION) == 0 &&
-			    fnmatch(srv_conf->name, host->kv_value,
-			    FNM_CASEFOLD) == 0) {
+			    fnmatch(srv_conf->name, hostname,
+			    FNM_CASEFOLD) == 0 &&
+			    (portval == -1 ||
+			    (portval != -1 && portval == srv_conf->port))) {
 				/* Replace host configuration */
 				clt->clt_srv_conf = srv_conf;
 				srv_conf = NULL;
