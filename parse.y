@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.38 2014/09/05 10:04:20 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.42 2014/11/20 05:51:20 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -69,7 +69,9 @@ int		 popfile(void);
 int		 check_file_secrecy(int, const char *);
 int		 yyparse(void);
 int		 yylex(void);
-int		 yyerror(const char *, ...);
+int		 yyerror(const char *, ...)
+    __attribute__((__format__ (printf, 1, 2)))
+    __attribute__((__nonnull__ (1)));
 int		 kw_cmp(const void *, const void *);
 int		 lookup(char *);
 int		 lgetc(int);
@@ -127,8 +129,8 @@ typedef struct {
 
 %token	ACCESS AUTO BACKLOG BODY BUFFER CERTIFICATE CHROOT CIPHERS COMMON
 %token	COMBINED CONNECTION DIRECTORY ERR FCGI INDEX IP KEY LISTEN LOCATION
-%token	LOG MAXIMUM NO NODELAY ON PORT PREFORK REQUEST REQUESTS ROOT SACK
-%token	SERVER SOCKET SSL STYLE SYSLOG TCP TIMEOUT TYPES
+%token	LOG LOGDIR MAXIMUM NO NODELAY ON PORT PREFORK REQUEST REQUESTS ROOT
+%token	SACK SERVER SOCKET SSL STYLE SYSLOG TCP TIMEOUT TYPES
 %token	ERROR INCLUDE
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
@@ -181,13 +183,16 @@ main		: PREFORK NUMBER	{
 				break;
 			if ($2 <= 0 || $2 > SERVER_MAXPROC) {
 				yyerror("invalid number of preforked "
-				    "servers: %d", $2);
+				    "servers: %lld", $2);
 				YYERROR;
 			}
 			conf->sc_prefork_server = $2;
 		}
 		| CHROOT STRING		{
 			conf->sc_chroot = $2;
+		}
+		| LOGDIR STRING		{
+			conf->sc_logdir = $2;
 		}
 		;
 
@@ -281,12 +286,18 @@ server		: SERVER STRING		{
 				free(srv);
 				YYERROR;
 			}
+<<<<<<< parse.y
+
+			TAILQ_INSERT_TAIL(conf->sc_servers, srv, srv_entry);
+
+=======
 
 			DPRINTF("adding server \"%s[%u]\"",
 			    srv->srv_conf.name, srv->srv_conf.id);
 
 			TAILQ_INSERT_TAIL(conf->sc_servers, srv, srv_entry);
 
+>>>>>>> 1.42
 			srv = NULL;
 			srv_conf = NULL;
 		}
@@ -428,6 +439,26 @@ serveroptsl	: LISTEN ON STRING optssl port {
 			srv = s;
 			srv_conf = &srv->srv_conf;
 			SPLAY_INIT(&srv->srv_clients);
+<<<<<<< parse.y
+		} '{' optnl serveropts_l '}'	{
+			struct server	*s = NULL;
+
+			TAILQ_FOREACH(s, conf->sc_servers, srv_entry) {
+				if ((s->srv_conf.flags & SRVFLAG_LOCATION) &&
+				    s->srv_conf.id == srv_conf->id &&
+				    strcmp(s->srv_conf.location,
+				    srv_conf->location) == 0)
+					break;
+			}
+			if (s != NULL) {
+				yyerror("location \"%s\" defined twice",
+				    srv->srv_conf.location);
+				serverconfig_free(srv_conf);
+				free(srv);
+				YYABORT;
+			}
+
+=======
 		} '{' optnl serveropts_l '}'	{
 			struct server	*s = NULL;
 
@@ -450,6 +481,7 @@ serveroptsl	: LISTEN ON STRING optssl port {
 			    srv->srv_conf.location,
 			    srv->srv_conf.name, srv->srv_conf.id);
 
+>>>>>>> 1.42
 			TAILQ_INSERT_TAIL(conf->sc_servers, srv, srv_entry);
 
 			srv = parentsrv;
@@ -658,7 +690,7 @@ tcpflags	: SACK			{ srv_conf->tcpflags |= TCPFLAG_SACK; }
 		}
 		| BACKLOG NUMBER	{
 			if ($2 < 0 || $2 > SERVER_MAX_CLIENTS) {
-				yyerror("invalid backlog: %d", $2);
+				yyerror("invalid backlog: %lld", $2);
 				YYERROR;
 			}
 			srv_conf->tcpbacklog = $2;
@@ -666,13 +698,13 @@ tcpflags	: SACK			{ srv_conf->tcpflags |= TCPFLAG_SACK; }
 		| SOCKET BUFFER NUMBER	{
 			srv_conf->tcpflags |= TCPFLAG_BUFSIZ;
 			if ((srv_conf->tcpbufsiz = $3) < 0) {
-				yyerror("invalid socket buffer size: %d", $3);
+				yyerror("invalid socket buffer size: %lld", $3);
 				YYERROR;
 			}
 		}
 		| IP STRING NUMBER	{
 			if ($3 < 0) {
-				yyerror("invalid ttl: %d", $3);
+				yyerror("invalid ttl: %lld", $3);
 				free($2);
 				YYERROR;
 			}
@@ -768,7 +800,7 @@ port		: PORT STRING {
 		}
 		| PORT NUMBER {
 			if ($2 <= 0 || $2 >= (int)USHRT_MAX) {
-				yyerror("invalid port: %d", $2);
+				yyerror("invalid port: %lld", $2);
 				YYERROR;
 			}
 			$$.val[0] = htons($2);
@@ -779,7 +811,7 @@ port		: PORT STRING {
 timeout		: NUMBER
 		{
 			if ($1 < 0) {
-				yyerror("invalid timeout: %d\n", $1);
+				yyerror("invalid timeout: %lld", $1);
 				YYERROR;
 			}
 			$$.tv_sec = $1;
@@ -825,15 +857,15 @@ int
 yyerror(const char *fmt, ...)
 {
 	va_list		 ap;
-	char		*nfmt;
+	char		*msg;
 
 	file->errors++;
 	va_start(ap, fmt);
-	if (asprintf(&nfmt, "%s:%d: %s", file->name, yylval.lineno, fmt) == -1)
-		fatalx("yyerror asprintf");
-	vlog(LOG_CRIT, nfmt, ap);
+	if (vasprintf(&msg, fmt, ap) == -1)
+		fatalx("yyerror vasprintf");
 	va_end(ap);
-	free(nfmt);
+	logit(LOG_CRIT, "%s:%d: %s", file->name, yylval.lineno, msg);
+	free(msg);
 	return (0);
 }
 
@@ -869,6 +901,7 @@ lookup(char *s)
 		{ "listen",		LISTEN },
 		{ "location",		LOCATION },
 		{ "log",		LOG },
+		{ "logdir",		LOGDIR },
 		{ "max",		MAXIMUM },
 		{ "no",			NO },
 		{ "nodelay",		NODELAY },
@@ -1060,6 +1093,9 @@ top:
 			} else if (c == quotec) {
 				*p = '\0';
 				break;
+			} else if (c == '\0') {
+				yyerror("syntax error");
+				return (findeol());
 			}
 			if (p + 1 >= buf + sizeof(buf) - 1) {
 				yyerror("string too long");

@@ -1,4 +1,4 @@
-/*	$OpenBSD: logger.c,v 1.5 2014/08/06 12:56:58 reyk Exp $	*/
+/*	$OpenBSD: logger.c,v 1.7 2014/11/11 15:54:45 beck Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -164,8 +164,8 @@ logger_open_priv(struct imsg *imsg)
 
 	if ((size_t)snprintf(name, sizeof(name), "/%s", p) >= sizeof(name))
 		return (-1);
-	if ((len = (size_t)snprintf(path, sizeof(path), "%s%s",
-	    env->sc_chroot, HTTPD_LOGROOT)) >= sizeof(path))
+	if ((len = strlcpy(path, env->sc_logdir, sizeof(path)))
+	    >= sizeof(path))
 		return (-1);
 
 	p = path + len;
@@ -193,6 +193,9 @@ int
 logger_open(struct server *srv, struct server_config *srv_conf, void *arg)
 {
 	struct log_file	*log, *logfile = NULL, *errfile = NULL;
+
+	if (srv_conf->flags & SRVFLAG_SYSLOG)
+		return(0);
 
 	/* disassociate */
 	srv_conf->logaccess = srv_conf->logerror = NULL;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.21 2014/09/05 10:04:20 reyk Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.24 2014/11/11 15:54:45 beck Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -230,6 +230,12 @@ main(int argc, char *argv[])
 		env->sc_chroot = ps->ps_pw->pw_dir;
 	for (proc = 0; proc < nitems(procs); proc++)
 		procs[proc].p_chroot = env->sc_chroot;
+
+	if (env->sc_logdir == NULL) {
+		if (asprintf(&env->sc_logdir, "%s%s", env->sc_chroot,
+			HTTPD_LOGROOT) == -1)
+			errx(1, "malloc failed");
+	}
 
 	proc_init(ps, procs, nitems(procs));
 
@@ -536,6 +542,46 @@ canonicalize_host(const char *host, char *name, size_t len)
 }
 
 const char *
+url_decode(char *url)
+{
+	char	*p, *q;
+	char	 hex[3];
+	u_long	 x;
+
+	hex[2] = '\0';
+	p = q = url;
+
+	while (*p != '\0') {
+		switch (*p) {
+		case '%':
+			/* Encoding character is followed by two hex chars */
+			if (!(isxdigit(p[1]) && isxdigit(p[2])))
+				return (NULL);
+
+			hex[0] = p[1];
+			hex[1] = p[2];
+
+			/*
+			 * We don't have to validate "hex" because it is
+			 * guaranteed to include two hex chars followed by nul.
+			 */
+			x = strtoul(hex, NULL, 16);		
+			*q = (char)x;
+			p += 2;
+			break;
+		default:
+			*q = *p;
+			break;
+		}
+		p++;
+		q++;
+	}
+	*q = '\0';
+
+	return(url);
+}
+
+const char *
 canonicalize_path(const char *input, char *path, size_t len)
 {
 	const char	*i;
@@ -661,7 +707,7 @@ evbuffer_getline(struct evbuffer *evb)
 		free(str);
 		return (NULL);
 	}
-	
+
 	str[i] = '\0';
 
 	if ((i + 1) < len) {

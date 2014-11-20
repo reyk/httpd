@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_file.c,v 1.35 2014/08/29 13:01:46 reyk Exp $	*/
+/*	$OpenBSD: server_file.c,v 1.39 2014/10/25 03:23:49 lteo Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -26,7 +26,6 @@
 #include <sys/hash.h>
 
 #include <net/if.h>
-#include <netinet/in_systm.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -311,7 +310,7 @@ server_file_index(struct httpd *env, struct client *clt, struct stat *st)
 
 	/* A CSS stylesheet allows minimal customization by the user */
 	style = "body { background-color: white; color: black; font-family: "
-	    "sans-serif; }";
+	    "sans-serif; }\nhr { border: 0; border-bottom: 1px dashed; }\n";
 	/* Generate simple HTML index document */
 	if (evbuffer_add_printf(evb,
 	    "<!DOCTYPE HTML PUBLIC "
@@ -422,8 +421,16 @@ server_file_error(struct bufferevent *bev, short error, void *arg)
 		server_close(clt, "buffer event timeout");
 		return;
 	}
+	if (error & EVBUFFER_ERROR) {
+		if (errno == EFBIG) {
+			bufferevent_enable(bev, EV_READ);
+			return;
+		}
+		server_close(clt, "buffer event error");
+		return;
+	}
 	if (error & (EVBUFFER_READ|EVBUFFER_WRITE|EVBUFFER_EOF)) {
-		bufferevent_disable(bev, EV_READ);
+		bufferevent_disable(bev, EV_READ|EV_WRITE);
 
 		clt->clt_done = 1;
 
@@ -448,10 +455,6 @@ server_file_error(struct bufferevent *bev, short error, void *arg)
 		server_close(clt, "done");
 		return;
 	}
-	if (error & EVBUFFER_ERROR && errno == EFBIG) {
-		bufferevent_enable(bev, EV_READ);
-		return;
-	}
-	server_close(clt, "buffer event error");
+	server_close(clt, "unknown event error");
 	return;
 }

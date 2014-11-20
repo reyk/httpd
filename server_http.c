@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.50 2014/09/15 08:00:27 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.54 2014/10/25 03:23:49 lteo Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -26,7 +26,6 @@
 #include <sys/hash.h>
 
 #include <net/if.h>
-#include <netinet/in_systm.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -340,7 +339,7 @@ server_read_http(struct bufferevent *bev, void *arg)
 		case HTTP_METHOD_MERGE:
 		case HTTP_METHOD_BASELINE_CONTROL:
 		case HTTP_METHOD_MKACTIVITY:
- 		case HTTP_METHOD_ORDERPATCH:
+		case HTTP_METHOD_ORDERPATCH:
 		case HTTP_METHOD_ACL:
 		case HTTP_METHOD_MKREDIRECTREF:
 		case HTTP_METHOD_UPDATEREDIRECTREF:
@@ -554,7 +553,7 @@ void
 server_reset_http(struct client *clt)
 {
 	struct server		*srv = clt->clt_srv;
-	
+
 	server_httpdesc_free(clt->clt_descreq);
 	server_httpdesc_free(clt->clt_descresp);
 	clt->clt_headerlen = 0;
@@ -689,9 +688,6 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 
 	/* Do not send details of the Internal Server Error */
 	switch (code) {
-	case 500:
-		/* Do not send details of the Internal Server Error */
-		break;
 	case 301:
 	case 302:
 		if (asprintf(&extraheader, "Location: %s\r\n", msg) == -1) {
@@ -700,13 +696,23 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 		}
 		break;
 	default:
-		text = msg;
+<<<<<<< server_http.c
+=======
+		/*
+		 * Do not send details of the error.  Traditionally,
+		 * web servers responsed with the request path on 40x
+		 * errors which could be abused to inject JavaScript etc.
+		 * Instead of sanitizing the path here, we just don't
+		 * reprint it.
+		 */
+>>>>>>> 1.54
 		break;
 	}
 
 	/* A CSS stylesheet allows minimal customization by the user */
 	style = "body { background-color: white; color: black; font-family: "
-	    "'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', sans-serif; }";
+	    "'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', sans-serif; }\n"
+	    "hr { border: 0; border-bottom: 1px dashed; }\n";
 	/* Generate simple HTTP+HTML error document */
 	if (asprintf(&httpmsg,
 	    "HTTP/1.0 %03d %s\r\n"
@@ -724,15 +730,15 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	    "<style type=\"text/css\"><!--\n%s\n--></style>\n"
 	    "</head>\n"
 	    "<body>\n"
-	    "<h1>%s</h1>\n"
+	    "<h1>%03d %s</h1>\n"
 	    "<div id='m'>%s</div>\n"
-	    "<hr><address>%s at %s port %d</address>\n"
+	    "<hr>\n<address>%s</address>\n"
 	    "</body>\n"
 	    "</html>\n",
 	    code, httperr, tmbuf, HTTPD_SERVERNAME,
 	    extraheader == NULL ? "" : extraheader,
-	    code, httperr, style, httperr, text,
-	    HTTPD_SERVERNAME, hbuf, ntohs(srv_conf->port)) == -1)
+	    code, httperr, style, code, httperr, text,
+	    HTTPD_SERVERNAME) == -1)
 		goto done;
 
 	/* Dump the message without checking for success */
@@ -752,14 +758,27 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 void
 server_close_http(struct client *clt)
 {
+<<<<<<< server_http.c
 	struct http_descriptor *desc;
 
 	desc = clt->clt_descreq;
 	server_httpdesc_free(desc);
 	free(desc);
 	clt->clt_descreq = NULL;
+=======
+	struct http_descriptor *desc;
+>>>>>>> 1.54
+
+<<<<<<< server_http.c
+	desc = clt->clt_descresp;
+=======
+	desc = clt->clt_descreq;
+	server_httpdesc_free(desc);
+	free(desc);
+	clt->clt_descreq = NULL;
 
 	desc = clt->clt_descresp;
+>>>>>>> 1.54
 	server_httpdesc_free(desc);
 	free(desc);
 	clt->clt_descresp = NULL;
@@ -780,6 +799,7 @@ server_response(struct httpd *httpd, struct client *clt)
 
 	/* Canonicalize the request path */
 	if (desc->http_path == NULL ||
+	    url_decode(desc->http_path) == NULL ||
 	    canonicalize_path(desc->http_path, path, sizeof(path)) == NULL)
 		goto fail;
 	free(desc->http_path);

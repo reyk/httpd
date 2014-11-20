@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.59 2014/09/10 15:39:57 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.63 2014/11/11 15:54:45 beck Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -26,7 +26,7 @@
 #include <sys/param.h>		/* MAXHOSTNAMELEN */
 #include <limits.h>
 #include <imsg.h>
-#include <ressl.h>
+#include <tls.h>
 
 #define CONF_FILE		"/etc/httpd.conf"
 #define HTTPD_SOCKET		"/var/run/httpd.sock"
@@ -281,7 +281,7 @@ struct client {
 	int			 clt_sndbufsiz;
 
 	int			 clt_fd;
-	struct ressl		*clt_ressl_ctx;
+	struct tls		*clt_tls_ctx;
 	struct bufferevent	*clt_srvbev;
 
 	off_t			 clt_toread;
@@ -408,8 +408,8 @@ struct server {
 	struct event		 srv_ev;
 	struct event		 srv_evt;
 
-	struct ressl		 *srv_ressl_ctx;
-	struct ressl_config	 *srv_ressl_config;
+	struct tls		 *srv_tls_ctx;
+	struct tls_config	 *srv_tls_config;
 
 	struct client_tree	 srv_clients;
 };
@@ -433,6 +433,7 @@ struct httpd {
 	u_int16_t		 sc_id;
 	int			 sc_paused;
 	char			*sc_chroot;
+	char			*sc_logdir;
 
 	struct serverlist	*sc_servers;
 	struct mediatypes	*sc_mediatypes;
@@ -543,6 +544,7 @@ int	 fcgi_add_stdin(struct client *, struct evbuffer *);
 void		 event_again(struct event *, int, short,
 		    void (*)(int, short, void *),
 		    struct timeval *, struct timeval *, void *);
+const char	*url_decode(char *);
 const char	*canonicalize_host(const char *, char *, size_t);
 const char	*canonicalize_path(const char *, char *, size_t);
 size_t		 path_info(char *);
@@ -586,6 +588,7 @@ void	log_warn(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
 void	log_warnx(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
 void	log_info(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
 void	log_debug(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
+void	logit(int, const char *, ...) __attribute__((__format__ (printf, 2, 3)));
 void	vlog(int, const char *, va_list) __attribute__((__format__ (printf, 2, 0)));
 __dead void fatal(const char *);
 __dead void fatalx(const char *);
