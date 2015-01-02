@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.24 2014/11/11 15:54:45 beck Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.28 2014/12/11 17:06:55 schwarze Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -22,7 +22,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
-#include <sys/hash.h>
 
 #include <net/if.h>
 #include <netinet/in.h>
@@ -40,8 +39,6 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <pwd.h>
-#include <sha1.h>
-#include <md5.h>
 
 #include "httpd.h"
 
@@ -493,7 +490,7 @@ canonicalize_host(const char *host, char *name, size_t len)
 {
 	struct sockaddr_in	 sin4;
 	struct sockaddr_in6	 sin6;
-	u_int			 i, j;
+	size_t			 i, j;
 	size_t			 plen;
 	char			 c;
 
@@ -565,7 +562,7 @@ url_decode(char *url)
 			 * We don't have to validate "hex" because it is
 			 * guaranteed to include two hex chars followed by nul.
 			 */
-			x = strtoul(hex, NULL, 16);		
+			x = strtoul(hex, NULL, 16);
 			*q = (char)x;
 			p += 2;
 			break;
@@ -692,7 +689,7 @@ evbuffer_getline(struct evbuffer *evb)
 	u_int8_t	*ptr = EVBUFFER_DATA(evb);
 	size_t		 len = EVBUFFER_LENGTH(evb);
 	char		*str;
-	u_int		 i;
+	size_t		 i;
 
 	/* Safe version of evbuffer_readline() */
 	if ((str = get_string(ptr, len)) == NULL)
@@ -1119,11 +1116,13 @@ media_find(struct mediatypes *types, char *file)
 	struct media_type	*match, media;
 	char			*p;
 
-	if ((p = strrchr(file, '.')) == NULL) {
-		p = file;
-	} else if (*p++ == '\0') {
+	/* Last component of the file name */
+	p = strchr(file, '\0');
+	while (p > file && p[-1] != '.' && p[-1] != '/')
+		p--;
+	if (*p == '\0')
 		return (NULL);
-	}
+
 	if (strlcpy(media.media_name, p,
 	    sizeof(media.media_name)) >=
 	    sizeof(media.media_name)) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_fcgi.c,v 1.40 2014/10/25 03:23:49 lteo Exp $	*/
+/*	$OpenBSD: server_fcgi.c,v 1.43 2014/12/21 00:54:49 guenther Exp $	*/
 
 /*
  * Copyright (c) 2014 Florian Obser <florian@openbsd.org>
@@ -23,13 +23,11 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/tree.h>
-#include <sys/hash.h>
 
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
-#include <arpa/inet.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -96,24 +94,12 @@ server_fcgi(struct httpd *env, struct client *clt)
 {
 	struct server_fcgi_param	 param;
 	struct server_config		*srv_conf = clt->clt_srv_conf;
-<<<<<<< server_fcgi.c
 	struct http_descriptor		*desc = clt->clt_descreq;
-	struct sockaddr_un		 sun;
-=======
-	struct http_descriptor		*desc = clt->clt_descreq;
->>>>>>> 1.40
 	struct fcgi_record_header	*h;
 	struct fcgi_begin_request_body	*begin;
-<<<<<<< server_fcgi.c
-	size_t				 len;
 	char				 hbuf[MAXHOSTNAMELEN];
 	size_t				 scriptlen;
 	int				 pathlen;
-=======
-	char				 hbuf[MAXHOSTNAMELEN];
-	size_t				 scriptlen;
-	int				 pathlen;
->>>>>>> 1.40
 	int				 fd = -1, ret;
 	const char			*errstr = NULL;
 	char				*str, *p, *script = NULL;
@@ -266,7 +252,7 @@ server_fcgi(struct httpd *env, struct client *clt)
 		goto fail;
 	}
 
-	if (srv_conf->flags & SRVFLAG_SSL)
+	if (srv_conf->flags & SRVFLAG_TLS)
 		if (fcgi_add_param(&param, "HTTPS", "on", clt) == -1) {
 			errstr = "failed to encode param";
 			goto fail;
@@ -667,60 +653,6 @@ server_fcgi_writeheader(struct client *clt, struct kv *hdr, void *arg)
 int
 server_fcgi_writechunk(struct client *clt)
 {
-<<<<<<< server_fcgi.c
-	struct evbuffer *evb = clt->clt_srvevb;
-	size_t		 len;
-
-	if (clt->clt_fcgi_type == FCGI_END_REQUEST) {
-		len = 0;
-	} else
-		len = EVBUFFER_LENGTH(evb);
-
-	/* If len is 0, make sure to write the end marker only once */
-	if (len == 0 && clt->clt_fcgi_end++)
-		return (0);
-
-	if (clt->clt_fcgi_chunked) {
-		if (server_bufferevent_printf(clt, "%zx\r\n", len) == -1 ||
-		    server_bufferevent_write_chunk(clt, evb, len) == -1 ||
-		    server_bufferevent_print(clt, "\r\n") == -1)
-			return (-1);
-	} else
-		return (server_bufferevent_write_buffer(clt, evb));
-
-	return (0);
-}
-
-int
-server_fcgi_getheaders(struct client *clt)
-{
-	struct http_descriptor	*resp = clt->clt_descresp;
-	struct evbuffer		*evb = clt->clt_srvevb;
-	int			 code = 200;
-	char			*line, *key, *value;
-	const char		*errstr;
-
-	while ((line = evbuffer_getline(evb)) != NULL && *line != '\0') {
-		key = line;
-
-		if ((value = strchr(key, ':')) == NULL)
-			break;
-		if (*value == ':') {
-			*value++ = '\0';
-			value += strspn(value, " \t");
-		} else {
-			*value++ = '\0';
-		}
-
-		if (strcasecmp("Status", key) == 0) {
-			value[strcspn(value, " \t")] = '\0';
-			code = (int)strtonum(value, 100, 600, &errstr);
-			if (errstr != NULL || server_httperror_byid(
-			    code) == NULL)
-				code = 200;
-		} else {
-			(void)kv_add(&resp->http_headers, key, value);
-=======
 	struct evbuffer *evb = clt->clt_srvevb;
 	size_t		 len;
 
@@ -775,7 +707,6 @@ server_fcgi_getheaders(struct client *clt)
 				code = 200;
 		} else {
 			(void)kv_add(&resp->http_headers, key, value);
->>>>>>> 1.40
 		}
 		free(line);
 	}

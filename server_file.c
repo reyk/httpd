@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_file.c,v 1.39 2014/10/25 03:23:49 lteo Exp $	*/
+/*	$OpenBSD: server_file.c,v 1.43 2015/01/01 14:15:02 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -23,13 +23,11 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/tree.h>
-#include <sys/hash.h>
 
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
-#include <arpa/inet.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -83,7 +81,7 @@ server_file_access(struct httpd *env, struct client *clt,
 		/* Redirect to path with trailing "/" */
 		if (path[strlen(path) - 1] != '/') {
 			if (asprintf(&newpath, "http%s://%s%s/",
-			    srv_conf->flags & SRVFLAG_SSL ? "s" : "",
+			    srv_conf->flags & SRVFLAG_TLS ? "s" : "",
 			    desc->http_host, desc->http_path) == -1)
 				return (500);
 			/* Path alias will be used for the redirection */
@@ -313,8 +311,7 @@ server_file_index(struct httpd *env, struct client *clt, struct stat *st)
 	    "sans-serif; }\nhr { border: 0; border-bottom: 1px dashed; }\n";
 	/* Generate simple HTML index document */
 	if (evbuffer_add_printf(evb,
-	    "<!DOCTYPE HTML PUBLIC "
-	    "\"-//W3C//DTD HTML 4.01 Transitional//EN\">\n"
+	    "<!DOCTYPE html>\n"
 	    "<html>\n"
 	    "<head>\n"
 	    "<title>Index of %s</title>\n"

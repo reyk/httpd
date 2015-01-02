@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.22 2014/09/05 10:04:20 reyk Exp $	*/
+/*	$OpenBSD: config.c,v 1.26 2014/12/21 00:54:49 guenther Exp $	*/
 
 /*
  * Copyright (c) 2011 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -25,8 +25,6 @@
 #include <net/if.h>
 #include <net/pfvar.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
-#include <arpa/nameser.h>
 #include <net/route.h>
 
 #include <ctype.h>
@@ -185,13 +183,13 @@ config_setserver(struct httpd *env, struct server *srv)
 		c = 0;
 		iov[c].iov_base = &s;
 		iov[c++].iov_len = sizeof(s);
-		if (srv->srv_conf.ssl_cert_len != 0) {
-			iov[c].iov_base = srv->srv_conf.ssl_cert;
-			iov[c++].iov_len = srv->srv_conf.ssl_cert_len;
+		if (srv->srv_conf.tls_cert_len != 0) {
+			iov[c].iov_base = srv->srv_conf.tls_cert;
+			iov[c++].iov_len = srv->srv_conf.tls_cert_len;
 		}
-		if (srv->srv_conf.ssl_key_len != 0) {
-			iov[c].iov_base = srv->srv_conf.ssl_key;
-			iov[c++].iov_len = srv->srv_conf.ssl_key_len;
+		if (srv->srv_conf.tls_key_len != 0) {
+			iov[c].iov_base = srv->srv_conf.tls_key;
+			iov[c++].iov_len = srv->srv_conf.tls_key_len;
 		}
 
 		if (id == PROC_SERVER &&
@@ -285,7 +283,7 @@ config_getserver_config(struct httpd *env, struct server *srv,
 		if ((srv_conf->flags & f) == 0)
 			srv_conf->flags |= parent->flags & f;
 
-		f = SRVFLAG_SSL;
+		f = SRVFLAG_TLS;
 		srv_conf->flags |= parent->flags & f;
 
 		f = SRVFLAG_ACCESS_LOG;
@@ -346,8 +344,8 @@ config_getserver(struct httpd *env, struct imsg *imsg)
 	/* Reset these variables to avoid free'ing invalid pointers */
 	serverconfig_reset(&srv_conf);
 
-	if ((u_int)(IMSG_DATA_SIZE(imsg) - s) <
-	    (srv_conf.ssl_cert_len + srv_conf.ssl_key_len)) {
+	if ((off_t)(IMSG_DATA_SIZE(imsg) - s) <
+	    (srv_conf.tls_cert_len + srv_conf.tls_key_len)) {
 		log_debug("%s: invalid message length", __func__);
 		goto fail;
 	}
@@ -384,24 +382,26 @@ config_getserver(struct httpd *env, struct imsg *imsg)
 	    srv->srv_conf.name, srv->srv_conf.id,
 	    printb_flags(srv->srv_conf.flags, SRVFLAG_BITS));
 
-	if (srv->srv_conf.ssl_cert_len != 0) {
-		if ((srv->srv_conf.ssl_cert = get_data(p + s,
-		    srv->srv_conf.ssl_cert_len)) == NULL)
+	if (srv->srv_conf.tls_cert_len != 0) {
+		if ((srv->srv_conf.tls_cert = get_data(p + s,
+		    srv->srv_conf.tls_cert_len)) == NULL)
 			goto fail;
-		s += srv->srv_conf.ssl_cert_len;
+		s += srv->srv_conf.tls_cert_len;
 	}
-	if (srv->srv_conf.ssl_key_len != 0) {
-		if ((srv->srv_conf.ssl_key = get_data(p + s,
-		    srv->srv_conf.ssl_key_len)) == NULL)
+	if (srv->srv_conf.tls_key_len != 0) {
+		if ((srv->srv_conf.tls_key = get_data(p + s,
+		    srv->srv_conf.tls_key_len)) == NULL)
 			goto fail;
-		s += srv->srv_conf.ssl_key_len;
+		s += srv->srv_conf.tls_key_len;
 	}
 
 	return (0);
 
  fail:
-	free(srv->srv_conf.ssl_cert);
-	free(srv->srv_conf.ssl_key);
+	if (srv != NULL) {
+		free(srv->srv_conf.tls_cert);
+		free(srv->srv_conf.tls_key);
+	}
 	free(srv);
 
 	return (-1);

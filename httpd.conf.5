@@ -1,4 +1,4 @@
-.\"	$OpenBSD: httpd.conf.5,v 1.36 2014/11/12 16:52:44 jmc Exp $
+.\"	$OpenBSD: httpd.conf.5,v 1.40 2014/12/28 13:53:23 reyk Exp $
 .\"
 .\" Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: November 12 2014 $
+.Dd $Mdocdate: December 28 2014 $
 .Dt HTTPD.CONF 5
 .Os
 .Sh NAME
@@ -49,6 +49,15 @@ If the address is an interface name,
 .Xr httpd 8
 will look up the first IPv4 address and any other IPv4 and IPv6
 addresses of the specified network interface.
+If
+.Sq *
+is given as an address,
+it will be used as an alias for
+.Ar 0.0.0.0
+to listen on all IPv4 addresses.
+Likewise,
+.Sq ::
+can be used to listen on all IPv6 addresses.
 A
 .Ar port
 can be specified by number or name.
@@ -169,7 +178,7 @@ root directory of
 .Xr httpd 8
 and defaults to
 .Pa /run/slowcgi.sock .
-.It Ic listen on Ar address Oo Ic ssl Oc Ic port Ar number
+.It Ic listen on Ar address Oo Ic tls Oc Ic port Ar number
 Set the listen address and port.
 .It Ic location Ar path Brq ...
 Specify server configuration rules for a specific location.
@@ -246,33 +255,6 @@ root directory of
 .Nm httpd .
 If not specified, it defaults to
 .Pa /htdocs .
-.It Ic ssl Ar option
-Set the SSL configuration for the server.
-These options are only used if SSL has been enabled via the listen directive.
-Valid options are:
-.Bl -tag -width Ds
-.It Ic certificate Ar file
-Specify the certificate to use for this server.
-The
-.Ar file
-should contain a PEM encoded certificate.
-.It Ic ciphers Ar string
-Specify the SSL cipher string.
-If not specified, the default value
-.Qq HIGH:!aNULL
-will be used (strong crypto cipher suites without anonymous DH).
-See the CIPHERS section of
-.Xr openssl 1
-for information about SSL cipher suites and preference lists.
-.It Ic key Ar file
-Specify the private key to use for this server.
-The
-.Ar file
-should contain a PEM encoded private key and reside outside of the
-.Xr chroot 2
-root directory of
-.Nm httpd .
-.El
 .It Ic tcp Ar option
 Enable or disable the specified TCP/IP options; see
 .Xr tcp 4
@@ -297,14 +279,40 @@ according to RFC 5082.
 Change the default time-to-live value in the IP headers.
 .It Oo Ic no Oc Ic nodelay
 Enable the TCP NODELAY option for this connection.
-This is recommended to avoid delays in the relayed data stream,
-e.g. for SSH connections.
+This is recommended to avoid delays in the data stream.
 .It Oo Ic no Oc Ic sack
 Use selective acknowledgements for this connection.
 .It Ic socket buffer Ar number
 Set the socket-level buffer size for input and output for this
 connection.
 This will affect the TCP window size.
+.El
+.It Ic tls Ar option
+Set the TLS configuration for the server.
+These options are only used if TLS has been enabled via the listen directive.
+Valid options are:
+.Bl -tag -width Ds
+.It Ic certificate Ar file
+Specify the certificate to use for this server.
+The
+.Ar file
+should contain a PEM encoded certificate.
+.It Ic ciphers Ar string
+Specify the TLS cipher string.
+If not specified, the default value
+.Qq HIGH:!aNULL
+will be used (strong crypto cipher suites without anonymous DH).
+See the CIPHERS section of
+.Xr openssl 1
+for information about SSL/TLS cipher suites and preference lists.
+.It Ic key Ar file
+Specify the private key to use for this server.
+The
+.Ar file
+should contain a PEM encoded private key and reside outside of the
+.Xr chroot 2
+root directory of
+.Nm httpd .
 .El
 .El
 .Sh TYPES
@@ -346,16 +354,13 @@ Include types definitions from an external file, for example
 .El
 .Sh EXAMPLES
 The following example will start one server that is pre-forked two
-times and listening on the primary IP address of the network interface
-that is a member of the
-.Qq egress
-group.
+times and is listening on all local IP addresses.
 It additionally defines some media types overriding the defaults.
 .Bd -literal -offset indent
 prefork 2
 
 server "default" {
-	listen on egress port 80
+	listen on * port 80
 }
 
 types {
@@ -367,6 +372,16 @@ types {
 	image/png			png
 	application/javascript		js
 	application/xml			xml
+}
+.Ed
+.Pp
+The server can also be configured to only listen on the primary IP
+address of the network interface that is a member of the
+.Qq egress
+group.
+.Bd -literal -offset indent
+server "default" {
+	listen on egress port 80
 }
 .Ed
 .Pp
