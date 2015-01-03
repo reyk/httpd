@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.47 2015/01/03 15:49:18 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.48 2015/01/03 16:20:31 reyk Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -226,6 +226,7 @@ server		: SERVER STRING		{
 			strlcpy(s->srv_conf.errorlog, HTTPD_ERROR_LOG,
 			    sizeof(s->srv_conf.errorlog));
 			s->srv_conf.id = ++last_server_id;
+			s->srv_s = -1;
 			s->srv_conf.timeout.tv_sec = SERVER_TIMEOUT;
 			s->srv_conf.maxrequests = SERVER_MAXREQUESTS;
 			s->srv_conf.maxrequestbody = SERVER_MAXREQUESTBODY;
@@ -493,6 +494,7 @@ serveroptsl	: LISTEN ON STRING opttls port {
 			/* A location entry uses the parent id */
 			s->srv_conf.id = srv->srv_conf.id;
 			s->srv_conf.flags = SRVFLAG_LOCATION;
+			s->srv_s = -1;
 			memcpy(&s->srv_conf.ss, &srv->srv_conf.ss,
 			    sizeof(s->srv_conf.ss));
 			s->srv_conf.port = srv->srv_conf.port;
@@ -1742,8 +1744,11 @@ server_inherit(struct server *src, const char *name,
 		fatal("out of memory");
 
 	dst->srv_conf.id = ++last_server_id;
+	dst->srv_s = -1;
+
 	if (last_server_id == INT_MAX) {
 		yyerror("too many servers defined");
+		serverconfig_free(&dst->srv_conf);
 		free(dst);
 		return (NULL);
 	}
@@ -1805,6 +1810,7 @@ server_inherit(struct server *src, const char *name,
 		    sizeof(dstl->srv_conf.ss));
 		dstl->srv_conf.port = addr->port;
 		dstl->srv_conf.prefixlen = addr->prefixlen;
+		dstl->srv_s = -1;
 
 		DPRINTF("adding location \"%s\" for \"%s[%u]\"",
 		    dstl->srv_conf.location,
