@@ -174,7 +174,9 @@ config_setserver(struct httpd *env, struct server *srv)
 		if ((what & CONFIG_SERVERS) == 0 || id == privsep_process)
 			continue;
 
-		DPRINTF("%s: sending server \"%s[%u]\" to %s fd %d", __func__,
+		DPRINTF("%s: sending %s \"%s[%u]\" to %s fd %d", __func__,
+		    (srv->srv_conf.flags & SRVFLAG_LOCATION) ?
+		    "location" : "server",
 		    srv->srv_conf.name, srv->srv_conf.id,
 		    ps->ps_title[id], srv->srv_s);
 

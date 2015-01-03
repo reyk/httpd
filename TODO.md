@@ -30,8 +30,8 @@ is to set a non-accessible root:
                 root "/forbidden"
         }
 
-#20150102-04 server aliases **OPEN**
-------------------------------------
+#20150102-04 server aliases **PENDING**
+---------------------------------------
 
 Server aliases and a few restrictions of the grammar: Individual
 server blocks can currently only have one name and listen statement.
