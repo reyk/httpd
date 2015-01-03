@@ -30,8 +30,22 @@ is to set a non-accessible root:
                 root "/forbidden"
         }
 
-#20150102-04 server aliases **PENDING**
+#20150102-04 server aliases **CLOSED**
 ---------------------------------------
+
+Update: server aliases and multiple listen statements are supported:
+
+> Support alias names and multiple listen statements per server block.
+The implementation is done in the parser by expanding each
+alias/listen into an independent server configuration; this makes it
+easier to handle internally without adding additional loops or
+conditions.
+
+	server "www.example.com" {
+		alias "example.com"
+		listen on * port 80
+		listen on * tls port 443
+	}
 
 Server aliases and a few restrictions of the grammar: Individual
 server blocks can currently only have one name and listen statement.
