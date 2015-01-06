@@ -31,7 +31,7 @@ is to set a non-accessible root:
         }
 
 #20150102-04 server aliases **CLOSED**
----------------------------------------
+--------------------------------------
 
 Update: server aliases and multiple listen statements are supported:
 
@@ -84,7 +84,9 @@ our excellent man pages and examples.  Examples for each CMS would go
 beyond the scope of them, and probably don't fit into the OpenBSD FAQ.
 So I'm thinking about putting something on http://bsd.plumbing/.
 
-#20150102-07 root strip **OPEN**
---------------------------------
+#20150102-07 root strip **CLOSED**
+----------------------------------
+
+Update: committed.
 
 Finish httpd URI stripping by Christopher Zimmermann.
