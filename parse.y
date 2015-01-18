@@ -1,7 +1,7 @@
-/*	$OpenBSD: parse.y,v 1.52 2015/01/07 11:04:29 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.54 2015/01/16 06:40:17 deraadt Exp $	*/
 
 /*
- * Copyright (c) 2007 - 2014 Reyk Floeter <reyk@openbsd.org>
+ * Copyright (c) 2007 - 2015 Reyk Floeter <reyk@openbsd.org>
  * Copyright (c) 2008 Gilles Chehade <gilles@openbsd.org>
  * Copyright (c) 2006 Pierre-Yves Ritschard <pyr@openbsd.org>
  * Copyright (c) 2004, 2005 Esben Norby <norby@openbsd.org>
@@ -119,7 +119,7 @@ typedef struct {
 		struct portrange	 port;
 		struct {
 			struct sockaddr_storage	 ss;
-			char			 name[MAXHOSTNAMELEN];
+			char			 name[HOST_NAME_MAX+1];
 		}			 addr;
 	} v;
 	int lineno;
