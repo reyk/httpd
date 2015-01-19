@@ -259,7 +259,7 @@ server_fcgi(struct httpd *env, struct client *clt)
 		goto fail;
 	}
 
-	if (srv_conf->flags & SRVFLAG_AUTH_BASIC) {
+	if (srv_conf->flags & SRVFLAG_AUTH) {
 		if (fcgi_add_param(&param, "REMOTE_USER",
 		    clt->clt_fcgi_remote_user, clt) == -1) {
 			errstr = "failed to encode param";

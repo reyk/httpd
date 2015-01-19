@@ -136,6 +136,7 @@ server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 {
 	FILE *fp = NULL;
 	struct http_descriptor *desc = clt->clt_descreq;
+	struct auth *auth = srv_conf->auth;
 	struct kv *ba, key;
 	size_t linesize = 0;
 	ssize_t linelen;
@@ -166,7 +167,7 @@ server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 	if (clt_pass == NULL)
 		goto done;
 
-	if ((fp = fopen(srv_conf->auth_htpasswd, "r")) == NULL)
+	if ((fp = fopen(auth->auth_htpasswd, "r")) == NULL)
 		goto done;
 
 	while ((linelen = getline(&line, &linesize, fp)) != -1) {
@@ -964,7 +965,7 @@ server_response(struct httpd *httpd, struct client *clt)
 	/* Now search for the location */
 	srv_conf = server_getlocation(clt, desc->http_path);
 
-	if (srv_conf->flags & SRVFLAG_AUTH_BASIC &&
+	if (srv_conf->flags & SRVFLAG_AUTH &&
 	    server_http_authenticate(srv_conf, clt) == -1) {
 		server_abort_http(clt, 401, srv_conf->auth_realm);
 		return (-1);

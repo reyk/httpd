@@ -139,7 +139,7 @@ and include one or more lines of the following syntax:
 Specify an additional alias
 .Ar name
 for this server.
-.It Ic authenticate Oo Ar realm Oc Ic with Pa htpasswd
+.It Oo Ic no Oc Ic authenticate Oo Ar realm Oc Ic with Pa htpasswd
 Authenticate a remote user for
 .Ar realm
 by checking the credentials against the user authentication file
@@ -147,6 +147,9 @@ by checking the credentials against the user authentication file
 The file name is relative to the
 .Ic chroot
 and must be readable by the www user.
+Use the
+.Ic no authenticate
+directive to disable authentication in a location.
 .It Ic connection Ar option
 Set the specified options and limits for HTTP connections.
 Valid options are:
