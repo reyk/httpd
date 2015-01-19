@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_fcgi.c,v 1.47 2015/01/18 14:01:17 florian Exp $	*/
+/*	$OpenBSD: server_fcgi.c,v 1.48 2015/01/19 19:37:50 reyk Exp $	*/
 
 /*
  * Copyright (c) 2014 Florian Obser <florian@openbsd.org>
