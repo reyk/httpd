@@ -324,6 +324,7 @@ server_purge(struct server *srv)
 void
 serverconfig_free(struct server_config *srv_conf)
 {
+	free(srv_conf->return_uri);
 	free(srv_conf->tls_cert_file);
 	free(srv_conf->tls_cert);
 	free(srv_conf->tls_key_file);
