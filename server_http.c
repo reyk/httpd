@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.66 2015/01/19 19:37:50 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.69 2015/01/21 22:21:05 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -18,28 +18,20 @@
 
 #include <sys/types.h>
 #include <sys/queue.h>
-#include <sys/time.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/tree.h>
 
-#include <net/if.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/tcp.h>
+#include <arpa/inet.h>
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
 #include <stdio.h>
-#include <err.h>
-#include <pwd.h>
+#include <time.h>
 #include <resolv.h>
-#include <syslog.h>
 #include <event.h>
 #include <fnmatch.h>
 
@@ -163,6 +155,8 @@ server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 
 	clt_user = decoded;
 	*clt_pass++ = '\0';
+	if ((clt->clt_remote_user = strdup(clt_user)) == NULL)
+		goto done;
 
 	if (clt_pass == NULL)
 		goto done;
@@ -190,9 +184,7 @@ server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 
 		if (crypt_checkpass(clt_pass, pass) == 0) {
 			explicit_bzero(line, linelen);
-			clt->clt_fcgi_remote_user = strdup(clt_user);
-			if (clt->clt_fcgi_remote_user != NULL)
-				ret = 0;
+			ret = 0;
 			break;
 		}
 	}
@@ -631,8 +623,8 @@ server_reset_http(struct client *clt)
 	clt->clt_line = 0;
 	clt->clt_done = 0;
 	clt->clt_chunk = 0;
-	free(clt->clt_fcgi_remote_user);
-	clt->clt_fcgi_remote_user = NULL;
+	free(clt->clt_remote_user);
+	clt->clt_remote_user = NULL;
 	clt->clt_bev->readcb = server_read_http;
 	clt->clt_srv_conf = &srv->srv_conf;
 
@@ -853,8 +845,8 @@ server_close_http(struct client *clt)
 	server_httpdesc_free(desc);
 	free(desc);
 	clt->clt_descresp = NULL;
-	free(clt->clt_fcgi_remote_user);
-	clt->clt_fcgi_remote_user = NULL;
+	free(clt->clt_remote_user);
+	clt->clt_remote_user = NULL;
 }
 
 int
@@ -1266,8 +1258,9 @@ server_log_http(struct client *clt, u_int code, size_t len)
 	switch (srv_conf->logformat) {
 	case LOG_FORMAT_COMMON:
 		if (evbuffer_add_printf(clt->clt_log,
-		    "%s %s - - [%s] \"%s %s%s%s%s%s\" %03d %zu\n",
-		    srv_conf->name, ip, tstamp,
+		    "%s %s - %s [%s] \"%s %s%s%s%s%s\" %03d %zu\n",
+		    srv_conf->name, ip, clt->clt_remote_user == NULL ? "-" :
+		    clt->clt_remote_user, tstamp,
 		    server_httpmethod_byid(desc->http_method),
 		    desc->http_path == NULL ? "" : desc->http_path,
 		    desc->http_query == NULL ? "" : "?",
@@ -1290,8 +1283,9 @@ server_log_http(struct client *clt, u_int code, size_t len)
 			agent = NULL;
 
 		if (evbuffer_add_printf(clt->clt_log,
-		    "%s %s - - [%s] \"%s %s%s%s%s%s\" %03d %zu \"%s\" \"%s\"\n",
-		    srv_conf->name, ip, tstamp,
+		    "%s %s - %s [%s] \"%s %s%s%s%s%s\" %03d %zu \"%s\" \"%s\"\n",
+		    srv_conf->name, ip, clt->clt_remote_user == NULL ? "-" :
+		    clt->clt_remote_user, tstamp,
 		    server_httpmethod_byid(desc->http_method),
 		    desc->http_path == NULL ? "" : desc->http_path,
 		    desc->http_query == NULL ? "" : "?",

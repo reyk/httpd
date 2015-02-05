@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.70 2015/01/19 19:37:50 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.73 2015/01/21 22:23:24 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -21,9 +21,17 @@
 #ifndef _HTTPD_H
 #define _HTTPD_H
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/queue.h>
 #include <sys/tree.h>
+#include <sys/time.h>
 
+#include <net/if.h>
+
+#include <stdarg.h>
 #include <limits.h>
+#include <event.h>
 #include <imsg.h>
 #include <tls.h>
 
@@ -298,7 +306,7 @@ struct client {
 	int			 clt_fcgi_type;
 	int			 clt_fcgi_chunked;
 	int			 clt_fcgi_end;
-	char			*clt_fcgi_remote_user;
+	char			*clt_remote_user;
 	struct evbuffer		*clt_srvevb;
 
 	struct evbuffer		*clt_log;

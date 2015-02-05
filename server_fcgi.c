@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_fcgi.c,v 1.48 2015/01/19 19:37:50 reyk Exp $	*/
+/*	$OpenBSD: server_fcgi.c,v 1.51 2015/01/21 22:23:24 reyk Exp $	*/
 
 /*
  * Copyright (c) 2014 Florian Obser <florian@openbsd.org>
@@ -17,26 +17,20 @@
  */
 
 #include <sys/types.h>
-#include <sys/queue.h>
 #include <sys/time.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <sys/tree.h>
 
-#include <net/if.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/tcp.h>
+#include <arpa/inet.h>
 
+#include <limits.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <stdio.h>
+#include <time.h>
 #include <ctype.h>
-#include <err.h>
 #include <event.h>
 
 #include "httpd.h"
@@ -261,7 +255,7 @@ server_fcgi(struct httpd *env, struct client *clt)
 
 	if (srv_conf->flags & SRVFLAG_AUTH) {
 		if (fcgi_add_param(&param, "REMOTE_USER",
-		    clt->clt_fcgi_remote_user, clt) == -1) {
+		    clt->clt_remote_user, clt) == -1) {
 			errstr = "failed to encode param";
 			goto fail;
 		}

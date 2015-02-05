@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.56 2015/01/19 19:37:50 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.59 2015/01/29 08:52:52 reyk Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -29,19 +29,19 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/queue.h>
+#include <sys/tree.h>
 #include <sys/ioctl.h>
+#include <sys/sockio.h>
+#include <sys/time.h>
 
 #include <net/if.h>
-#include <net/pfvar.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <net/route.h>
 
 #include <ctype.h>
 #include <unistd.h>
 #include <err.h>
 #include <errno.h>
-#include <event.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -369,11 +369,6 @@ serveroptsl	: LISTEN ON STRING opttls port {
 				s_conf = alias;
 			} else
 				s_conf = &srv->srv_conf;
-			if ($5.op != PF_OP_EQ) {
-				yyerror("invalid port");
-				free($3);
-				YYERROR;
-			}
 
 			TAILQ_INIT(&al);
 			if (host($3, &al, 1, &$5, NULL, -1) <= 0) {
@@ -901,39 +896,24 @@ medianamesl	: numberstring				{
 		}
 		;
 
-port		: PORT STRING {
-			char		*a, *b;
-			int		 p[2];
-
-			p[0] = p[1] = 0;
-
-			a = $2;
-			b = strchr($2, ':');
-			if (b == NULL)
-				$$.op = PF_OP_EQ;
-			else {
-				*b++ = '\0';
-				if ((p[1] = getservice(b)) == -1) {
-					free($2);
-					YYERROR;
-				}
-				$$.op = PF_OP_RRG;
-			}
-			if ((p[0] = getservice(a)) == -1) {
-				free($2);
-				YYERROR;
-			}
-			$$.val[0] = p[0];
-			$$.val[1] = p[1];
-			free($2);
-		}
-		| PORT NUMBER {
+port		: PORT NUMBER {
 			if ($2 <= 0 || $2 >= (int)USHRT_MAX) {
 				yyerror("invalid port: %lld", $2);
 				YYERROR;
 			}
 			$$.val[0] = htons($2);
-			$$.op = PF_OP_EQ;
+		}
+		| PORT STRING {
+			int	 val;
+
+			if ((val = getservice($2)) == -1) {
+				yyerror("invalid port: %s", $2);
+				free($2);
+				YYERROR;
+			}
+			free($2);
+
+			$$.val[0] = val;
 		}
 		;
 
