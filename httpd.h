@@ -381,6 +381,7 @@ TAILQ_HEAD(serverauth, auth);
 
 struct server_config {
 	u_int32_t		 id;
+	u_int32_t		 parent_id;
 	char			 name[HOST_NAME_MAX+1];
 	char			 location[NAME_MAX];
 	char			 index[NAME_MAX];

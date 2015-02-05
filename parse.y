@@ -229,6 +229,7 @@ server		: SERVER STRING		{
 			strlcpy(s->srv_conf.errorlog, HTTPD_ERROR_LOG,
 			    sizeof(s->srv_conf.errorlog));
 			s->srv_conf.id = ++last_server_id;
+			s->srv_conf.parent_id = s->srv_conf.id;
 			s->srv_s = -1;
 			s->srv_conf.timeout.tv_sec = SERVER_TIMEOUT;
 			s->srv_conf.maxrequests = SERVER_MAXREQUESTS;
@@ -479,8 +480,9 @@ serveroptsl	: LISTEN ON STRING opttls port {
 				YYERROR;
 			}
 
+			s->srv_conf.id = ++last_server_id;
 			/* A location entry uses the parent id */
-			s->srv_conf.id = srv->srv_conf.id;
+			s->srv_conf.parent_id = srv->srv_conf.id;
 			s->srv_conf.flags = SRVFLAG_LOCATION;
 			s->srv_s = -1;
 			memcpy(&s->srv_conf.ss, &srv->srv_conf.ss,
@@ -1809,6 +1811,7 @@ server_inherit(struct server *src, const char *name,
 	dst->srv_conf.tls_key = NULL;
 
 	dst->srv_conf.id = ++last_server_id;
+	dst->srv_conf.parent_id = dst->srv_conf.id;
 	dst->srv_s = -1;
 
 	if (last_server_id == INT_MAX) {
