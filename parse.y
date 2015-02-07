@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.59 2015/01/29 08:52:52 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.61 2015/02/07 01:23:12 reyk Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -1850,7 +1850,6 @@ server_inherit(struct server *src, const char *name,
 
 	/* Copy the source server and assign a new Id */
 	memcpy(&dst->srv_conf, &src->srv_conf, sizeof(dst->srv_conf));
-
 	if ((dst->srv_conf.tls_cert_file =
 	    strdup(src->srv_conf.tls_cert_file)) == NULL)
 		fatal("out of memory");
@@ -1918,7 +1917,7 @@ server_inherit(struct server *src, const char *name,
 	/* Copy all the locations of the source server */
 	TAILQ_FOREACH(s, conf->sc_servers, srv_entry) {
 		if (!(s->srv_conf.flags & SRVFLAG_LOCATION &&
-		    s->srv_conf.id == src->srv_conf.id))
+		    s->srv_conf.parent_id == src->srv_conf.parent_id))
 			continue;
 
 		if ((dstl = calloc(1, sizeof(*dstl))) == NULL)
@@ -1928,7 +1927,8 @@ server_inherit(struct server *src, const char *name,
 		strlcpy(dstl->srv_conf.name, name, sizeof(dstl->srv_conf.name));
 
 		/* Copy the new Id and listen address */
-		dstl->srv_conf.id = dst->srv_conf.id;
+		dstl->srv_conf.id = ++last_server_id;
+		dstl->srv_conf.parent_id = dst->srv_conf.id;
 		memcpy(&dstl->srv_conf.ss, &addr->ss,
 		    sizeof(dstl->srv_conf.ss));
 		dstl->srv_conf.port = addr->port;
