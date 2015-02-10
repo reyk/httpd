@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.72 2015/02/07 01:23:12 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.74 2015/02/08 00:00:59 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -126,15 +126,16 @@ server_httpdesc_free(struct http_descriptor *desc)
 int
 server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 {
-	FILE *fp = NULL;
-	struct http_descriptor *desc = clt->clt_descreq;
-	struct auth *auth = srv_conf->auth;
-	struct kv *ba, key;
-	size_t linesize = 0;
-	ssize_t linelen;
-	int ret = -1;
-	char *line = NULL, decoded[1024];
-	char *clt_user = NULL, *clt_pass = NULL, *user = NULL, *pass = NULL;
+	char			 decoded[1024];
+	FILE			*fp = NULL;
+	struct http_descriptor	*desc = clt->clt_descreq;
+	struct auth		*auth = srv_conf->auth;
+	struct kv		*ba, key;
+	size_t			 linesize = 0;
+	ssize_t			 linelen;
+	int			 ret = -1;
+	char			*line = NULL, *user = NULL, *pass = NULL;
+	char			*clt_user = NULL, *clt_pass = NULL;
 
 	memset(decoded, 0, sizeof(decoded));
 	key.kv_key = "Authorization";
@@ -146,7 +147,7 @@ server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 	if (strncmp(ba->kv_value, "Basic ", strlen("Basic ")) != 0)
 		goto done;
 
-	if (b64_pton(strchr(ba->kv_value, ' ') + 1, decoded,
+	if (b64_pton(strchr(ba->kv_value, ' ') + 1, (u_int8_t *)decoded,
 	    sizeof(decoded)) <= 0)
 		goto done;
 
@@ -1293,7 +1294,8 @@ server_log_http(struct client *clt, u_int code, size_t len)
 			agent = NULL;
 
 		if (evbuffer_add_printf(clt->clt_log,
-		    "%s %s - %s [%s] \"%s %s%s%s%s%s\" %03d %zu \"%s\" \"%s\"\n",
+		    "%s %s - %s [%s] \"%s %s%s%s%s%s\""
+		    " %03d %zu \"%s\" \"%s\"\n",
 		    srv_conf->name, ip, clt->clt_remote_user == NULL ? "-" :
 		    clt->clt_remote_user, tstamp,
 		    server_httpmethod_byid(desc->http_method),

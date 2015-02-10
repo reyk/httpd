@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.55 2015/02/07 01:23:12 reyk Exp $	*/
+/*	$OpenBSD: server.c,v 1.57 2015/02/07 23:56:02 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -130,50 +130,23 @@ server_privinit(struct server *srv)
 	return (0);
 }
 
-static char *
-server_load_file(const char *filename, off_t *len)
-{
-	struct stat		 st;
-	off_t			 size;
-	char			*buf = NULL;
-	int			 fd;
-
-	if ((fd = open(filename, O_RDONLY)) == -1)
-		return (NULL);
-	if (fstat(fd, &st) != 0)
-		goto fail;
-	size = st.st_size;
-	if ((buf = calloc(1, size + 1)) == NULL)
-		goto fail;
-	if (read(fd, buf, size) != size)
-		goto fail;
-
-	close(fd);
-
-	*len = size;
-	return (buf);
-
- fail:
-	free(buf);
-	close(fd);
-
-	return (NULL);
-}
-
 int
 server_tls_load_keypair(struct server *srv)
 {
 	if ((srv->srv_conf.flags & SRVFLAG_TLS) == 0)
 		return (0);
 
-	if ((srv->srv_conf.tls_cert = server_load_file(
-	    srv->srv_conf.tls_cert_file, &srv->srv_conf.tls_cert_len)) == NULL)
+	if ((srv->srv_conf.tls_cert = tls_load_file(
+	    srv->srv_conf.tls_cert_file, &srv->srv_conf.tls_cert_len,
+	    NULL)) == NULL)
 		return (-1);
 	log_debug("%s: using certificate %s", __func__,
 	    srv->srv_conf.tls_cert_file);
 
-	if ((srv->srv_conf.tls_key = server_load_file(
-	    srv->srv_conf.tls_key_file, &srv->srv_conf.tls_key_len)) == NULL)
+	/* XXX allow to specify password for encrypted key */
+	if ((srv->srv_conf.tls_key = tls_load_file(
+	    srv->srv_conf.tls_key_file, &srv->srv_conf.tls_key_len,
+	    NULL)) == NULL)
 		return (-1);
 	log_debug("%s: using private key %s", __func__,
 	    srv->srv_conf.tls_key_file);
@@ -207,6 +180,17 @@ server_tls_init(struct server *srv)
 		log_warn("%s: failed to set tls ciphers", __func__);
 		return (-1);
 	}
+	if (tls_config_set_dheparams(srv->srv_tls_config,
+	    srv->srv_conf.tls_dhe_params) != 0) {
+		log_warn("%s: failed to set tls dhe params", __func__);
+		return (-1);
+	}
+	if (tls_config_set_ecdhecurve(srv->srv_tls_config,
+	    srv->srv_conf.tls_ecdhe_curve) != 0) {
+		log_warn("%s: failed to set tls ecdhe curve", __func__);
+		return (-1);
+	}
+
 	if (tls_config_set_cert_mem(srv->srv_tls_config,
 	    srv->srv_conf.tls_cert, srv->srv_conf.tls_cert_len) != 0) {
 		log_warn("%s: failed to set tls cert", __func__);
@@ -334,8 +318,8 @@ serverconfig_free(struct server_config *srv_conf)
 void
 serverconfig_reset(struct server_config *srv_conf)
 {
-	srv_conf->tls_cert_file = srv_conf->tls_cert =
-	    srv_conf->tls_key_file = srv_conf->tls_key = NULL;
+	srv_conf->tls_cert_file = srv_conf->tls_key_file = NULL;
+	srv_conf->tls_cert = srv_conf->tls_key = NULL;
 	srv_conf->auth = NULL;
 }
 
