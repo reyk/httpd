@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.57 2015/02/07 23:56:02 reyk Exp $	*/
+/*	$OpenBSD: server.c,v 1.60 2015/02/23 09:52:28 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -175,6 +175,9 @@ server_tls_init(struct server *srv)
 		return (-1);
 	}
 
+	tls_config_set_protocols(srv->srv_tls_config,
+	    srv->srv_conf.tls_protocols);
+
 	if (tls_config_set_ciphers(srv->srv_tls_config,
 	    srv->srv_conf.tls_ciphers) != 0) {
 		log_warn("%s: failed to set tls ciphers", __func__);
@@ -320,6 +323,7 @@ serverconfig_reset(struct server_config *srv_conf)
 {
 	srv_conf->tls_cert_file = srv_conf->tls_key_file = NULL;
 	srv_conf->tls_cert = srv_conf->tls_key = NULL;
+	srv_conf->return_uri = NULL;
 	srv_conf->auth = NULL;
 }
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.32 2015/02/08 00:00:59 reyk Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.35 2015/02/23 18:43:18 reyk Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -494,6 +494,39 @@ event_again(struct event *ev, int fd, short event,
 	event_add(ev, &tv);
 }
 
+int
+expand_string(char *label, size_t len, const char *srch, const char *repl)
+{
+	char *tmp;
+	char *p, *q;
+
+	if ((tmp = calloc(1, len)) == NULL) {
+		log_debug("%s: calloc", __func__);
+		return (-1);
+	}
+	p = q = label;
+	while ((q = strstr(p, srch)) != NULL) {
+		*q = '\0';
+		if ((strlcat(tmp, p, len) >= len) ||
+		    (strlcat(tmp, repl, len) >= len)) {
+			log_debug("%s: string too long", __func__);
+			free(tmp);
+			return (-1);
+		}
+		q += strlen(srch);
+		p = q;
+	}
+	if (strlcat(tmp, p, len) >= len) {
+		log_debug("%s: string too long", __func__);
+		free(tmp);
+		return (-1);
+	}
+	(void)strlcpy(label, tmp, len);	/* always fits */
+	free(tmp);
+
+	return (0);
+}
+
 const char *
 canonicalize_host(const char *host, char *name, size_t len)
 {
@@ -669,6 +702,62 @@ path_info(char *path)
 	}
 
 	return (p - start);
+}
+
+char *
+url_encode(const char *src)
+{
+	static char	 hex[] = "0123456789ABCDEF";
+	char		*dp, *dst;
+	unsigned char	 c;
+
+	/* We need 3 times the memory if every letter is encoded. */
+	if ((dst = calloc(3, strlen(src) + 1)) == NULL)
+		return (NULL);
+
+	for (dp = dst; *src != 0; src++) {
+		c = (unsigned char) *src;
+		if (c == ' ' || c == '#' || c == '%' || c == '?' || c == '"' ||
+		    c == '&' || c == '<' || c <= 0x1f || c >= 0x7f) {
+			*dp++ = '%';
+			*dp++ = hex[c >> 4];
+			*dp++ = hex[c & 0x0f];
+		} else
+			*dp++ = *src;
+	}
+	return (dst);
+}
+
+char*
+escape_html(const char* src)
+{
+	char		*dp, *dst;
+
+	/* We need 5 times the memory if every letter is "<" or ">". */
+	if ((dst = calloc(5, strlen(src) + 1)) == NULL)
+		return NULL;
+
+	for (dp = dst; *src != 0; src++) {
+		if (*src == '<') {
+			*dp++ = '&';
+			*dp++ = 'l';
+			*dp++ = 't';
+			*dp++ = ';';
+		} else if (*src == '>') {
+			*dp++ = '&';
+			*dp++ = 'g';
+			*dp++ = 't';
+			*dp++ = ';';
+		} else if (*src == '&') {
+			*dp++ = '&';
+			*dp++ = 'a';
+			*dp++ = 'm';
+			*dp++ = 'p';
+			*dp++ = ';';
+		} else
+			*dp++ = *src;
+	}
+	return (dst);
 }
 
 void
