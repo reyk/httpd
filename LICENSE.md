@@ -8,8 +8,9 @@ httpd is free software under OpenBSD's ISC-style license.
 * And initially also by Pierre-Yves Ritschard <pyr@openbsd.org>
 * FastCGI code has been written by Florian Obser <florian@openbsd.org>
 * Please refer to the individual source files for other copyright holders!
+* Files in rfc/ are provided as reference; see their "Copyright Notice"
 
-> Copyright (c) 2007-2014 Reyk Floeter <reyk@openbsd.org>
+> Copyright (c) 2007-2015 Reyk Floeter <reyk@openbsd.org>
 > 
 > Permission to use, copy, modify, and distribute this software for any
 > purpose with or without fee is hereby granted, provided that the above
