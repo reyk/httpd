@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.61 2015/03/15 22:08:45 florian Exp $	*/
+/*	$OpenBSD: server.c,v 1.63 2015/04/23 16:59:28 florian Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -852,6 +852,11 @@ server_accept(int fd, short event, void *arg)
 	if ((clt = calloc(1, sizeof(*clt))) == NULL)
 		goto err;
 
+	/* Pre-allocate log buffer */
+	clt->clt_log = evbuffer_new();
+	if (clt->clt_log == NULL)
+		goto err;
+
 	clt->clt_s = s;
 	clt->clt_fd = -1;
 	clt->clt_toread = TOREAD_UNLIMITED;
@@ -896,13 +901,6 @@ server_accept(int fd, short event, void *arg)
 	clt->clt_output = evbuffer_new();
 	if (clt->clt_output == NULL) {
 		server_close(clt, "failed to allocate output buffer");
-		return;
-	}
-
-	/* Pre-allocate log buffer */
-	clt->clt_log = evbuffer_new();
-	if (clt->clt_log == NULL) {
-		server_close(clt, "failed to allocate log buffer");
 		return;
 	}
 
@@ -1010,7 +1008,11 @@ server_sendlog(struct server_config *srv_conf, int cmd, const char *emsg, ...)
 	iov[1].iov_base = msg;
 	iov[1].iov_len = strlen(msg) + 1;
 
-	proc_composev_imsg(env->sc_ps, PROC_LOGGER, -1, cmd, -1, iov, 2);
+	if (proc_composev_imsg(env->sc_ps, PROC_LOGGER, -1, cmd, -1, iov,
+	    2) != 0) {
+		log_warn("%s: failed to compose imsg", __func__);
+		return;
+	}
 }
 
 void

@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.75 2015/02/23 18:43:18 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.79 2015/05/03 18:39:58 florian Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -225,7 +225,8 @@ server_read_http(struct bufferevent *bev, void *arg)
 		goto done;
 	}
 
-	while (!clt->clt_done && (line = evbuffer_readline(src)) != NULL) {
+	while (!clt->clt_done && (line =
+	    evbuffer_readln(src, NULL, EVBUFFER_EOL_CRLF_STRICT)) != NULL) {
 		linelen = strlen(line);
 
 		/*
@@ -536,7 +537,7 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 	}
 	switch (clt->clt_toread) {
 	case TOREAD_HTTP_CHUNK_LENGTH:
-		line = evbuffer_readline(src);
+		line = evbuffer_readln(src, NULL, EVBUFFER_EOL_CRLF_STRICT);
 		if (line == NULL) {
 			/* Ignore empty line, continue */
 			bufferevent_enable(bev, EV_READ);
@@ -571,7 +572,7 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 		break;
 	case TOREAD_HTTP_CHUNK_TRAILER:
 		/* Last chunk is 0 bytes followed by trailer and empty line */
-		line = evbuffer_readline(src);
+		line = evbuffer_readln(src, NULL, EVBUFFER_EOL_CRLF_STRICT);
 		if (line == NULL) {
 			/* Ignore empty line, continue */
 			bufferevent_enable(bev, EV_READ);
@@ -591,7 +592,7 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 		break;
 	case 0:
 		/* Chunk is terminated by an empty newline */
-		line = evbuffer_readline(src);
+		line = evbuffer_readln(src, NULL, EVBUFFER_EOL_CRLF_STRICT);
 		if (line != NULL)
 			free(line);
 		if (server_bufferevent_print(clt, "\r\n") == -1)
@@ -783,6 +784,13 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	case 401:
 		if (asprintf(&extraheader,
 		    "WWW-Authenticate: Basic realm=\"%s\"\r\n", msg) == -1) {
+			code = 500;
+			extraheader = NULL;
+		}
+		break;
+	case 416:
+		if (asprintf(&extraheader,
+		    "Content-Range: %s\r\n", msg) == -1) {
 			code = 500;
 			extraheader = NULL;
 		}
