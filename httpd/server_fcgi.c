@@ -210,6 +210,13 @@ server_fcgi(struct httpd *env, struct client *clt)
 		}
 		script[scriptlen] = '\0';
 	}
+	else {
+		if (fcgi_add_param(&param, "PATH_INFO", "", clt) == -1) {
+			errstr = "failed to encode param";
+			goto fail;
+		}
+	}
+
 
 	/*
 	 * calculate length of http SCRIPT_NAME:
