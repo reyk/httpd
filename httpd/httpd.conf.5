@@ -1,4 +1,4 @@
-.\"	$OpenBSD: httpd.conf.5,v 1.57 2015/03/26 19:16:57 jmc Exp $
+.\"	$OpenBSD: httpd.conf.5,v 1.61 2015/05/28 19:29:40 jmc Exp $
 .\"
 .\" Copyright (c) 2014, 2015 Reyk Floeter <reyk@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: March 26 2015 $
+.Dd $Mdocdate: May 28 2015 $
 .Dt HTTPD.CONF 5
 .Os
 .Sh NAME
@@ -152,7 +152,7 @@ Use the
 directive to disable authentication in a location.
 .It Ic block drop
 Drop the connection without sending an error page.
-.It Ic block Op Ic return Ar code Op uri
+.It Ic block Op Ic return Ar code Op Ar uri
 Close the connection and send an error page.
 If the optional return code is not specified,
 .Xr httpd 8
@@ -166,7 +166,7 @@ argument can be used with return codes in the 3xx range to send a
 header for redirection to a specified URI.
 .Pp
 The
-.Ar url
+.Ar uri
 may contain predefined macros that will be expanded at runtime:
 .Pp
 .Bl -tag -width $DOCUMENT_URI -offset indent -compact
@@ -451,14 +451,14 @@ server "default" {
 }
 
 types {
-	text/css			css
-	text/html			htm html
-	text/txt			txt
-	image/gif			gif
-	image/jpeg			jpg jpeg
-	image/png			png
-	application/javascript		js
-	application/xml			xml
+	text/css		css
+	text/html		html htm
+	text/txt		txt
+	image/gif		gif
+	image/jpeg		jpeg jpg
+	image/png		png
+	application/javascript	js
+	application/xml		xml
 }
 .Ed
 .Pp
@@ -513,14 +513,6 @@ server "example.com" {
 server "www.example.com" {
 	listen on 10.0.0.1 port 80
 }
-.Ed
-.Pp
-The syntax of the types section is also compatible with the format
-used by nginx, so it is possible to include its
-.Pa mime.types
-file directly:
-.Bd -literal -offset indent
-include "/etc/nginx/mime.types"
 .Ed
 .Sh SEE ALSO
 .Xr htpasswd 1 ,

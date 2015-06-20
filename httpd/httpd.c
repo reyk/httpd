@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.35 2015/02/23 18:43:18 reyk Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.37 2015/06/03 02:24:36 millert Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -80,6 +80,8 @@ parent_sig_handler(int sig, short event, void *arg)
 		/* FALLTHROUGH */
 	case SIGCHLD:
 		do {
+			int len;
+
 			pid = waitpid(WAIT_ANY, &status, WNOHANG);
 			if (pid <= 0)
 				continue;
@@ -87,16 +89,20 @@ parent_sig_handler(int sig, short event, void *arg)
 			fail = 0;
 			if (WIFSIGNALED(status)) {
 				fail = 1;
-				asprintf(&cause, "terminated; signal %d",
+				len = asprintf(&cause, "terminated; signal %d",
 				    WTERMSIG(status));
 			} else if (WIFEXITED(status)) {
 				if (WEXITSTATUS(status) != 0) {
 					fail = 1;
-					asprintf(&cause, "exited abnormally");
+					len = asprintf(&cause,
+					    "exited abnormally");
 				} else
-					asprintf(&cause, "exited okay");
+					len = asprintf(&cause, "exited okay");
 			} else
 				fatalx("unexpected cause of SIGCHLD");
+
+			if (len == -1)
+				fatal("asprintf");
 
 			die = 1;
 
@@ -210,7 +216,7 @@ main(int argc, char *argv[])
 		errx(1, "unknown user %s", HTTPD_USER);
 
 	/* Configure the control socket */
-	ps->ps_csock.cs_name = HTTPD_SOCKET;
+	ps->ps_csock.cs_name = NULL;
 
 	log_init(debug);
 	log_verbose(verbose);
@@ -404,6 +410,8 @@ parent_shutdown(struct httpd *env)
 
 	proc_kill(env->sc_ps);
 	control_cleanup(&env->sc_ps->ps_csock);
+	if (env->sc_ps->ps_csock.cs_name != NULL)
+		(void)unlink(env->sc_ps->ps_csock.cs_name);
 
 	free(env->sc_ps);
 	free(env);
