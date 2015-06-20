@@ -738,7 +738,7 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 	const char		*httperr = NULL, *style;
 	char			*httpmsg, *body = NULL, *extraheader = NULL;
 	char			 tmbuf[32], hbuf[128];
-	char			 buf[IBUF_READ_SIZE], *ptr = NULL;
+	char			 buf[IBUF_READ_SIZE];
 	int			 bodylen;
 
 	if (code == 0) {
@@ -770,16 +770,13 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 		if (msg == NULL)
 			break;
 		memset(buf, 0, sizeof(buf));
-		if ((ptr = server_expand_http(clt, msg,
-		    buf, sizeof(buf))) == NULL)
+		if (server_expand_http(clt, msg, buf, sizeof(buf)) == NULL)
 			goto done;
-		if ((ptr = url_encode(ptr)) == NULL)
-			goto done;
-		if (asprintf(&extraheader, "Location: %s\r\n", ptr) == -1) {
+		if (asprintf(&extraheader, "Location: %s\r\n", buf) == -1) {
 			code = 500;
 			extraheader = NULL;
 		}
-		msg = ptr;
+		msg = buf;
 		break;
 	case 401:
 		if (asprintf(&extraheader,
@@ -858,7 +855,6 @@ server_abort_http(struct client *clt, u_int code, const char *msg)
 		server_close(clt, httpmsg);
 		free(httpmsg);
 	}
-	free(ptr);
 }
 
 void
@@ -885,14 +881,18 @@ server_expand_http(struct client *clt, const char *val, char *buf,
 {
 	struct http_descriptor	*desc = clt->clt_descreq;
 	struct server_config	*srv_conf = clt->clt_srv_conf;
-	char			 ibuf[128], *str;
+	char			 ibuf[128], *str, *path;
+	int			 ret;
 
 	if (strlcpy(buf, val, len) >= len)
 		return (NULL);
 
 	if (strstr(val, "$DOCUMENT_URI") != NULL) {
-		if (expand_string(buf, len, "$DOCUMENT_URI",
-		    desc->http_path) != 0)
+		if ((path = url_encode(desc->http_path)) == NULL)
+			return (NULL);
+		ret = expand_string(buf, len, "$DOCUMENT_URI", path);
+		free(path);
+		if (ret != 0)
 			return (NULL);
 	}
 	if (strstr(val, "$QUERY_STRING") != NULL) {
@@ -929,17 +929,22 @@ server_expand_http(struct client *clt, const char *val, char *buf,
 		}
 	}
 	if (strstr(val, "$REQUEST_URI") != NULL) {
+		if ((path = url_encode(desc->http_path)) == NULL)
+			return (NULL);
 		if (desc->http_query == NULL) {
-			if ((str = strdup(desc->http_path)) == NULL)
+			str = path;
+		} else {
+			ret = asprintf(&str, "%s?%s",
+			    path, desc->http_query);
+			free(path);
+			if (ret == -1)
 				return (NULL);
-		} else if (asprintf(&str, "%s?%s",
-		    desc->http_path, desc->http_query) == -1)
-			return (NULL);
-		if (expand_string(buf, len, "$REQUEST_URI", str) != 0) {
-			free(str);
-			return (NULL);
 		}
+
+		ret = expand_string(buf, len, "$REQUEST_URI", str);
 		free(str);
+		if (ret != 0)
+			return (NULL);
 	}
 	if (strstr(val, "$SERVER_") != NULL) {
 		if (strstr(val, "$SERVER_ADDR") != NULL) {
