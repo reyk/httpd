@@ -275,8 +275,10 @@ start_capture(struct match_state *ms, const char *s, const char *p, int what)
 	const char *res;
 
 	int level = ms->level;
-	if (level >= ms->maxcaptures)
+	if (level >= ms->maxcaptures) {
 		match_error(ms, "too many captures");
+		return (NULL);
+	}
 	ms->capture[level].init = s;
 	ms->capture[level].len = what;
 	ms->level = level + 1;
@@ -320,8 +322,10 @@ match(struct match_state *ms, const char *s, const char *p)
 	const char *ep, *res;
 	char previous;
 
-	if (ms->matchdepth-- == 0)
+	if (ms->matchdepth-- == 0) {
 		match_error(ms, "pattern too complex");
+		return (NULL);
+	}
 
 	/* using goto's to optimize tail recursion */
  init:
@@ -364,9 +368,11 @@ match(struct match_state *ms, const char *s, const char *p)
 			case 'f':
 				/* frontier? */
 				p += 2;
-				if (*p != '[')
+				if (*p != '[') {
 					match_error(ms, "missing '['"
 					    " after '%%f' in pattern");
+					break;
+				}
 				/* points to what is next */
 				ep = classend(ms, p);
 				previous =
@@ -518,7 +524,7 @@ push_onecapture(struct match_state *ms, int i, const char *s,
 	} else {
 		ptrdiff_t l = ms->capture[i].len;
 		if (l == CAP_UNFINISHED)
-			match_error(ms, "unfinished capture");
+			return match_error(ms, "unfinished capture");
 		sm->sm_so = ms->capture[i].init - ms->src_init;
 		sm->sm_eo = sm->sm_so + l;
 	}
