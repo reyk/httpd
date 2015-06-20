@@ -6,6 +6,9 @@ SRCS+=		config.c control.c httpd.c log.c logger.c proc.c
 SRCS+=		server.c server_http.c server_file.c server_fcgi.c
 MAN=		httpd.8 httpd.conf.5
 
+SRCS+=		patterns.c
+MAN+=		patterns.7
+
 LDADD=		-levent -ltls -lssl -lcrypto -lutil
 DPADD=		${LIBEVENT} ${LIBTLS} ${LIBSSL} ${LIBCRYPTO} ${LIBUTIL}
 #DEBUG=		-g -DDEBUG=3 -O0
