@@ -291,6 +291,8 @@ end_capture(struct match_state *ms, const char *s, const char *p)
 {
 	int l = capture_to_close(ms);
 	const char *res;
+	if (l == -1)
+		return NULL;
 	/* close capture */
 	ms->capture[l].len = s - ms->capture[l].init;
 	/* undo capture if match failed */
