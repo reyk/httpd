@@ -375,6 +375,8 @@ match(struct match_state *ms, const char *s, const char *p)
 				}
 				/* points to what is next */
 				ep = classend(ms, p);
+				if (ms->error != NULL)
+					break;
 				previous =
 				    (s == ms->src_init) ? '\0' : *(s - 1);
 				if (!matchbracketclass(uchar(previous),
@@ -416,6 +418,8 @@ match(struct match_state *ms, const char *s, const char *p)
 	dflt:
 			/* points to optional suffix */
 			ep = classend(ms, p);
+			if (ms->error != NULL)
+				break;
 
 			/* does not match at least once? */
 			if (!singlematch(ms, s, p, ep)) {
