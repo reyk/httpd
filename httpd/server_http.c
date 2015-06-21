@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.80 2015/05/20 09:28:47 kettenis Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.81 2015/06/21 13:08:36 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -886,7 +886,7 @@ server_expand_http(struct client *clt, const char *val, char *buf,
 {
 	struct http_descriptor	*desc = clt->clt_descreq;
 	struct server_config	*srv_conf = clt->clt_srv_conf;
-	char			 ibuf[128], *str, *path;
+	char			 ibuf[128], *str, *path, *query;
 	const char		*errstr = NULL, *p;
 	size_t			 size;
 	int			 n, ret;
@@ -924,9 +924,15 @@ server_expand_http(struct client *clt, const char *val, char *buf,
 			return (NULL);
 	}
 	if (strstr(val, "$QUERY_STRING") != NULL) {
-		if (expand_string(buf, len, "$QUERY_STRING",
-		    desc->http_query == NULL ? "" :
-		    desc->http_query) != 0)
+		if (desc->http_query == NULL) {
+			ret = expand_string(buf, len, "$QUERY_STRING", "");
+		} else {
+			if ((query = url_encode(desc->http_query)) == NULL)
+				return (NULL);
+			ret = expand_string(buf, len, "$QUERY_STRING", query);
+			free(query);
+		}
+		if (ret != 0)
 			return (NULL);
 	}
 	if (strstr(val, "$REMOTE_") != NULL) {
@@ -962,9 +968,13 @@ server_expand_http(struct client *clt, const char *val, char *buf,
 		if (desc->http_query == NULL) {
 			str = path;
 		} else {
-			ret = asprintf(&str, "%s?%s",
-			    path, desc->http_query);
+			if ((query = url_encode(desc->http_query)) == NULL) {
+				free(path);
+				return (NULL);
+			}
+			ret = asprintf(&str, "%s?%s", path, query);
 			free(path);
+			free(query);
 			if (ret == -1)
 				return (NULL);
 		}
