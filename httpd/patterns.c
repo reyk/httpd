@@ -215,7 +215,7 @@ matchbalance(struct match_state *ms, const char *s, const char *p)
 {
 	if (p >= ms->p_end - 1) {
 		match_error(ms,
-		    "malformed pattern (missing arguments to '%%b')");
+		    "malformed pattern (missing arguments to '%b')");
 		return (NULL);
 	}
 	if (*s != *p)
@@ -308,6 +308,8 @@ match_capture(struct match_state *ms, const char *s, int l)
 {
 	size_t len;
 	l = check_capture(ms, l);
+	if (l == -1)
+		return NULL;
 	len = ms->capture[l].len;
 	if ((size_t) (ms->src_end - s) >= len &&
 	    memcmp(ms->capture[l].init, s, len) == 0)
@@ -370,7 +372,7 @@ match(struct match_state *ms, const char *s, const char *p)
 				p += 2;
 				if (*p != '[') {
 					match_error(ms, "missing '['"
-					    " after '%%f' in pattern");
+					    " after '%f' in pattern");
 					break;
 				}
 				/* points to what is next */
@@ -667,7 +669,7 @@ str_match(const char *string, const char *pattern, struct str_match *m,
 
 	ret = str_find_aux(&ms, pattern, string, sm, nsm, 0);
 	if (ret == 0 || ms.error != NULL) {
-		/* Return 0 on error and store the error string */
+		/* Return -1 on error and store the error string */
 		*errstr = ms.error;
 		return (-1);
 	}
