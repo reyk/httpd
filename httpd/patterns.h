@@ -23,7 +23,7 @@
 #define PATTERNS_H
 
 #define MAXCAPTURES	32	/* Max no. of allowed captures in pattern */
-#define MAXCCALLS	200	/* Max recusion depth in pattern matching */
+#define MAXCCALLS	5000	/* Max recusion depth in pattern matching */
 
 struct str_find {
 	off_t		 sm_so;	/* start offset of match */
