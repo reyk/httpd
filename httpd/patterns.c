@@ -1,4 +1,4 @@
-/*	$OpenBSD$	*/
+/*	$OpenBSD: patterns.c,v 1.2 2015/06/23 15:35:20 semarie Exp $	*/
 
 /*
  * Copyright (c) 2015 Reyk Floeter <reyk@openbsd.org>
@@ -26,7 +26,7 @@
 
 /*
  * Derived from Lua 5.3.1:
- * $Id: lstrlib.c,v 1.229 2015/05/20 17:39:23 roberto Exp $
+ * $Id: patterns.c,v 1.2 2015/06/23 15:35:20 semarie Exp $
  * Standard library for string operations and pattern-matching
  */
 
@@ -156,9 +156,6 @@ match_class(int c, int cl)
 	case 'x':
 		res = isxdigit(c);
 		break;
-	case 'z':
-		res = (c == 0);
-		break;		/* deprecated option */
 	default:
 		return (cl == c);
 	}

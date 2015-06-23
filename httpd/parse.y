@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.67 2015/04/01 04:51:15 jsg Exp $	*/
+/*	$OpenBSD: parse.y,v 1.68 2015/06/23 15:23:14 reyk Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2015 Reyk Floeter <reyk@openbsd.org>
