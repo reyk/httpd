@@ -425,11 +425,16 @@ match(struct match_state *ms, const char *s, const char *p)
 
 			/* does not match at least once? */
 			if (!singlematch(ms, s, p, ep)) {
+				if (ms->matchdepth-- == 0) {
+					match_error(ms, "pattern too complex");
+					s = NULL; /* failed */
+				}
+
 				/* accept empty? */
 				if (*ep == '*' || *ep == '?' || *ep == '-') {
-					p = ep + 1;
+					 p = ep + 1;
 					/* return match(ms, s, ep + 1); */
-					goto init;
+					 goto init;
 				} else {
 					/* '+' or no suffix */
 					s = NULL; /* fail */
@@ -621,11 +626,13 @@ str_find_aux(struct match_state *ms, const char *pattern, const char *string,
 	do {
 		const char *res;
 		ms->level = 0;
-		assert(ms->matchdepth == MAXCCALLS);
 		if ((res = match(ms, s1, p)) != NULL) {
 			sm->sm_so = 0;
 			sm->sm_eo = ls;
 			return push_captures(ms, s1, res, sm + 1, nsm - 1) + 1;
+
+		} else if (ms->error != NULL) {
+			return 0;
 		}
 	} while (s1++ < ms->src_end && !anchor);
 
