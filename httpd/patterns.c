@@ -425,14 +425,16 @@ match(struct match_state *ms, const char *s, const char *p)
 
 			/* does not match at least once? */
 			if (!singlematch(ms, s, p, ep)) {
+				if (ms->matchdepth-- == 0) {
+					match_error(ms, "pattern too complex");
+					s = NULL; /* failed */
+				}
+
 				/* accept empty? */
 				if (*ep == '*' || *ep == '?' || *ep == '-') {
+					 p = ep + 1;
 					/* return match(ms, s, ep + 1); */
-					return match(ms, s, ep + 1);
-					/*
-					 * p = ep + 1;
-					 * goto init;
-					 */
+					 goto init;
 				} else {
 					/* '+' or no suffix */
 					s = NULL; /* fail */
