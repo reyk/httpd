@@ -692,14 +692,12 @@ str_match(const char *string, const char *pattern, struct str_match *m,
 		if (sm[i].sm_so > sm[i].sm_eo)
 			continue;
 		len = sm[i].sm_eo - sm[i].sm_so;
-		if ((m->sm_match[i] = calloc(1,
-		    len + 1)) == NULL) {
+		if ((m->sm_match[i] = strndup(string +
+		    sm[i].sm_so, len)) == NULL) {
 			*errstr = strerror(errno);
 			str_match_free(m);
 			return (-1);
 		}
-		(void)memcpy(m->sm_match[i],
-		    string + sm[i].sm_so, len);
 	}
 
 	*errstr = NULL;
