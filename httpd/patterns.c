@@ -48,6 +48,7 @@
 struct match_state {
 	int matchdepth;		/* control for recursive depth (to avoid C
 				 * stack overflow) */
+	int repetitioncounter;	/* control the repetition items */
 	int maxcaptures;	/* configured capture limit */
 	const char *src_init;	/* init of source string */
 	const char *src_end;	/* end ('\0') of source string */
@@ -425,13 +426,12 @@ match(struct match_state *ms, const char *s, const char *p)
 
 			/* does not match at least once? */
 			if (!singlematch(ms, s, p, ep)) {
-				if (ms->matchdepth-- == 0) {
-					match_error(ms, "pattern too complex");
-					s = NULL; /* failed */
-				}
-
+				if (ms->repetitioncounter-- == 0) {
+					match_error(ms, "max repetition items");
+					s = NULL; /* fail */
 				/* accept empty? */
-				if (*ep == '*' || *ep == '?' || *ep == '-') {
+				} else if
+				    (*ep == '*' || *ep == '?' || *ep == '-') {
 					 p = ep + 1;
 					/* return match(ms, s, ep + 1); */
 					 goto init;
@@ -620,6 +620,7 @@ str_find_aux(struct match_state *ms, const char *pattern, const char *string,
 	}
 	ms->maxcaptures = (nsm > MAXCAPTURES ? MAXCAPTURES : nsm) - 1;
 	ms->matchdepth = MAXCCALLS;
+	ms->repetitioncounter = MAXREPETITION;
 	ms->src_init = s;
 	ms->src_end = s + ls;
 	ms->p_end = p + lp;

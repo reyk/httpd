@@ -98,3 +98,31 @@ stack traceback:
 	[C]: in function 'string.match'
 	./patterns-tester.lua:2: in main chunk
 	[C]: in ?
+string='q*********************************'
+pattern='*************************************q'
+lua53: ./patterns-tester.lua:2: max repetition items
+stack traceback:
+	[C]: in function 'string.match'
+	./patterns-tester.lua:2: in main chunk
+	[C]: in ?
+string='q+++++++++++++++++++++++++++++++++'
+pattern='+++++++++++++++++++++++++++++++++++++q'
+lua53: ./patterns-tester.lua:2: max repetition items
+stack traceback:
+	[C]: in function 'string.match'
+	./patterns-tester.lua:2: in main chunk
+	[C]: in ?
+string='q---------------------------------'
+pattern='-------------------------------------q'
+lua53: ./patterns-tester.lua:2: max repetition items
+stack traceback:
+	[C]: in function 'string.match'
+	./patterns-tester.lua:2: in main chunk
+	[C]: in ?
+string='q?????????????????????????????????'
+pattern='?????????????????????????????????????q'
+lua53: ./patterns-tester.lua:2: max repetition items
+stack traceback:
+	[C]: in function 'string.match'
+	./patterns-tester.lua:2: in main chunk
+	[C]: in ?

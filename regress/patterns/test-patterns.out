@@ -85,3 +85,15 @@ pattern='/page/%f'
 patterns-tester: str_match: missing '[' after '%f' in pattern
 string='/page/51'
 pattern='/page%f/51'
+patterns-tester: str_match: max repetition items
+string='q*********************************'
+pattern='*************************************q'
+patterns-tester: str_match: max repetition items
+string='q+++++++++++++++++++++++++++++++++'
+pattern='+++++++++++++++++++++++++++++++++++++q'
+patterns-tester: str_match: max repetition items
+string='q---------------------------------'
+pattern='-------------------------------------q'
+patterns-tester: str_match: max repetition items
+string='q?????????????????????????????????'
+pattern='?????????????????????????????????????q'
