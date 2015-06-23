@@ -1,6 +1,6 @@
-/* $OpenBSD$ */
+/* $OpenBSD: patterns-tester.c,v 1.1 2015/06/23 18:03:09 semarie Exp $ */
 /*
- * Copyright (c) 2015 Sebastien Marie
+ * Copyright (c) 2015 Sebastien Marie <semarie@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above

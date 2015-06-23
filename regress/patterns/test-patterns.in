@@ -1,4 +1,4 @@
-# $OpenBSD$
+# $OpenBSD: test-patterns.in,v 1.1 2015/06/23 18:03:09 semarie Exp $
 # string	pattern				comments
 /page/51	^/(%a+)/(%d+)$
 /Apage/51	/[^%d][%w%u][^%c]+()[%d]+	
