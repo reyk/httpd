@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.84 2015/06/23 15:23:14 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.88 2015/07/16 16:29:25 florian Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -34,6 +34,7 @@
 #include <event.h>
 #include <imsg.h>
 #include <tls.h>
+#include <vis.h>
 
 #include "patterns.h"
 
@@ -47,6 +48,7 @@
 #define HTTPD_LOGROOT		"/logs"
 #define HTTPD_ACCESS_LOG	"access.log"
 #define HTTPD_ERROR_LOG		"error.log"
+#define HTTPD_LOGVIS		VIS_NL|VIS_TAB|VIS_CSTYLE
 #define HTTPD_TLS_CERT		"/etc/ssl/server.crt"
 #define HTTPD_TLS_KEY		"/etc/ssl/private/server.key"
 #define HTTPD_TLS_CIPHERS	"HIGH:!aNULL"
@@ -64,6 +66,8 @@
 #define SERVER_MAXREQUESTBODY	1048576	/* 1M */
 #define SERVER_BACKLOG		10
 #define SERVER_OUTOF_FD_RETRIES	5
+#define SERVER_MAX_PREFETCH	256
+#define SERVER_MIN_PREFETCHED	32
 
 #define MEDIATYPE_NAMEMAX	128	/* file name extension */
 #define MEDIATYPE_TYPEMAX	64	/* length of type/subtype */
@@ -201,6 +205,7 @@ enum imsg_type {
 	IMSG_CTL_START,
 	IMSG_CTL_REOPEN,
 	IMSG_CFG_SERVER,
+	IMSG_CFG_TLS,
 	IMSG_CFG_MEDIA,
 	IMSG_CFG_AUTH,
 	IMSG_CFG_DONE,
@@ -442,6 +447,16 @@ struct server_config {
 };
 TAILQ_HEAD(serverhosts, server_config);
 
+struct tls_config {
+	u_int32_t		 id;
+
+	in_port_t		 port;
+	struct sockaddr_storage	 ss;
+
+	size_t			 tls_cert_len;
+	size_t			 tls_key_len;
+};
+
 struct server {
 	TAILQ_ENTRY(server)	 srv_entry;
 	struct server_config	 srv_conf;
@@ -680,7 +695,9 @@ int	 config_setreset(struct httpd *, u_int);
 int	 config_getreset(struct httpd *, struct imsg *);
 int	 config_getcfg(struct httpd *, struct imsg *);
 int	 config_setserver(struct httpd *, struct server *);
+int	 config_settls(struct httpd *, struct server *);
 int	 config_getserver(struct httpd *, struct imsg *);
+int	 config_gettls(struct httpd *, struct imsg *);
 int	 config_setmedia(struct httpd *, struct media_type *);
 int	 config_getmedia(struct httpd *, struct imsg *);
 int	 config_setauth(struct httpd *, struct auth *);
