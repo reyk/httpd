@@ -1,6 +1,6 @@
 #	$OpenBSD: Makefile,v 1.2 2015/06/23 19:33:06 reyk Exp $
 
-HTTPDSRC =	${.CURDIR}/../../httpd
+HTTPDSRC =	${.CURDIR}/../../../../usr.sbin/httpd
 
 .PATH:	${HTTPDSRC}
 
