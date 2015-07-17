@@ -220,7 +220,6 @@ server_fcgi(struct httpd *env, struct client *clt)
 		}
 	}
 
-
 	/*
 	 * calculate length of http SCRIPT_NAME:
 	 * add length of stripped prefix,
