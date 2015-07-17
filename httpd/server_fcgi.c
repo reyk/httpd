@@ -212,8 +212,8 @@ server_fcgi(struct httpd *env, struct client *clt)
 			goto fail;
 		}
 		script[scriptlen] = '\0';
-	}
-	else {
+	} else {
+		/* RFC 3875 mandates that PATH_INFO is empty if not set */
 		if (fcgi_add_param(&param, "PATH_INFO", "", clt) == -1) {
 			errstr = "failed to encode param";
 			goto fail;
