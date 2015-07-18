@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.70 2015/07/16 19:05:28 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.72 2015/07/18 06:00:43 reyk Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -133,7 +133,7 @@ typedef struct {
 %token	COMBINED CONNECTION DHE DIRECTORY ECDHE ERR FCGI INDEX IP KEY LISTEN
 %token	LOCATION LOG LOGDIR MATCH MAXIMUM NO NODELAY ON PORT PREFORK PROTOCOLS
 %token	REQUEST REQUESTS ROOT SACK SERVER SOCKET STRIP STYLE SYSLOG TCP TIMEOUT
-%token	TLS TYPES
+%token	TLS TYPE TYPES HSTS MAXAGE SUBDOMAINS DEFAULT
 %token	ERROR INCLUDE AUTHENTICATE WITH BLOCK DROP RETURN PASS
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
@@ -198,6 +198,10 @@ main		: PREFORK NUMBER	{
 		| LOGDIR STRING		{
 			conf->sc_logdir = $2;
 		}
+		| DEFAULT TYPE mediastring	{
+			memcpy(&conf->sc_default_type, &media,
+			    sizeof(struct media_type));
+		}
 		;
 
 server		: SERVER optmatch STRING	{
@@ -255,6 +259,8 @@ server		: SERVER optmatch STRING	{
 			strlcpy(s->srv_conf.tls_ecdhe_curve,
 			    HTTPD_TLS_ECDHE_CURVE,
 			    sizeof(s->srv_conf.tls_ecdhe_curve));
+
+			s->srv_conf.hsts_max_age = SERVER_HSTS_DEFAULT_AGE;
 
 			if (last_server_id == INT_MAX) {
 				yyerror("too many servers defined");
@@ -555,7 +561,40 @@ serveroptsl	: LISTEN ON STRING opttls port {
 			srv_conf = &parentsrv->srv_conf;
 			parentsrv = NULL;
 		}
+		| DEFAULT TYPE mediastring	{
+			srv_conf->flags |= SRVFLAG_DEFAULT_TYPE;
+			memcpy(&srv_conf->default_type, &media,
+			    sizeof(struct media_type));
+		}
 		| include
+		| hsts				{
+			if (parentsrv != NULL) {
+				yyerror("hsts inside location");
+				YYERROR;
+			}
+			srv->srv_conf.flags |= SRVFLAG_SERVER_HSTS;
+		}
+		;
+
+hsts		: HSTS '{' optnl hstsflags_l '}'
+		| HSTS hstsflags
+		| HSTS
+		;
+
+hstsflags_l	: hstsflags optcommanl hstsflags_l
+		| hstsflags optnl
+		;
+
+hstsflags	: MAXAGE NUMBER		{
+			if ($2 < 0 || $2 > INT_MAX) {
+				yyerror("invalid number of seconds: %lld", $2);
+				YYERROR;
+			}
+			srv_conf->hsts_max_age = $2;
+		}
+		| SUBDOMAINS		{
+			srv->srv_conf.hsts_subdomains = 1;
+		}
 		;
 
 fastcgi		: NO FCGI		{
@@ -961,7 +1000,11 @@ mediaopts_l	: mediaopts_l mediaoptsl nl
 		| mediaoptsl nl
 		;
 
-mediaoptsl	: STRING '/' STRING	{
+mediaoptsl	: mediastring medianames_l optsemicolon
+		| include
+		;
+
+mediastring	: STRING '/' STRING 	{
 			if (strlcpy(media.media_type, $1,
 			    sizeof(media.media_type)) >=
 			    sizeof(media.media_type) ||
@@ -975,8 +1018,7 @@ mediaoptsl	: STRING '/' STRING	{
 			}
 			free($1);
 			free($3);
-		} medianames_l optsemicolon
-		| include
+		}
 		;
 
 medianames_l	: medianames_l medianamesl
@@ -1109,12 +1151,14 @@ lookup(char *s)
 		{ "combined",		COMBINED },
 		{ "common",		COMMON },
 		{ "connection",		CONNECTION },
+		{ "default",		DEFAULT },
 		{ "dhe",		DHE },
 		{ "directory",		DIRECTORY },
 		{ "drop",		DROP },
 		{ "ecdhe",		ECDHE },
 		{ "error",		ERR },
 		{ "fastcgi",		FCGI },
+		{ "hsts",		HSTS },
 		{ "include",		INCLUDE },
 		{ "index",		INDEX },
 		{ "ip",			IP },
@@ -1125,6 +1169,7 @@ lookup(char *s)
 		{ "logdir",		LOGDIR },
 		{ "match",		MATCH },
 		{ "max",		MAXIMUM },
+		{ "max-age",		MAXAGE },
 		{ "no",			NO },
 		{ "nodelay",		NODELAY },
 		{ "on",			ON },
@@ -1141,10 +1186,12 @@ lookup(char *s)
 		{ "socket",		SOCKET },
 		{ "strip",		STRIP },
 		{ "style",		STYLE },
+		{ "subdomains",		SUBDOMAINS },
 		{ "syslog",		SYSLOG },
 		{ "tcp",		TCP },
 		{ "timeout",		TIMEOUT },
 		{ "tls",		TLS },
+		{ "type",		TYPE },
 		{ "types",		TYPES },
 		{ "with",		WITH }
 	};
@@ -1472,13 +1519,17 @@ popfile(void)
 int
 parse_config(const char *filename, struct httpd *x_conf)
 {
-	struct sym	*sym, *next;
+	struct sym		*sym, *next;
+	struct media_type	 dflt = HTTPD_DEFAULT_TYPE;
 
 	conf = x_conf;
 	if (config_init(conf) == -1) {
 		log_warn("%s: cannot initialize configuration", __func__);
 		return (-1);
 	}
+
+	/* Set default media type */
+	memcpy(&conf->sc_default_type, &dflt, sizeof(struct media_type));
 
 	errors = 0;
 
