@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_fcgi.c,v 1.55 2015/07/17 20:44:57 reyk Exp $	*/
+/*	$OpenBSD: server_fcgi.c,v 1.63 2015/08/03 11:45:17 florian Exp $	*/
 
 /*
  * Copyright (c) 2014 Florian Obser <florian@openbsd.org>
@@ -160,6 +160,7 @@ server_fcgi(struct httpd *env, struct client *clt)
 	if (clt->clt_srvbev != NULL)
 		bufferevent_free(clt->clt_srvbev);
 
+	clt->clt_srvbev_throttled = 0;
 	clt->clt_srvbev = bufferevent_new(fd, server_fcgi_read,
 	    NULL, server_file_error, clt);
 	if (clt->clt_srvbev == NULL) {
@@ -180,9 +181,12 @@ server_fcgi(struct httpd *env, struct client *clt)
 	    fcgi_record_header)];
 	begin->role = htons(FCGI_RESPONDER);
 
-	bufferevent_write(clt->clt_srvbev, &param.buf,
+	if (bufferevent_write(clt->clt_srvbev, &param.buf,
 	    sizeof(struct fcgi_record_header) +
-	    sizeof(struct fcgi_begin_request_body));
+	    sizeof(struct fcgi_begin_request_body)) == -1) {
+		errstr = "failed to write to evbuffer";
+		goto fail;
+	}
 
 	h->type = FCGI_PARAMS;
 	h->content_len = param.total_len = 0;
@@ -306,8 +310,12 @@ server_fcgi(struct httpd *env, struct client *clt)
 			errstr = "failed to encode param";
 			goto fail;
 		}
-	} else if (asprintf(&str, "%s?%s", desc->http_path,
-	    desc->http_query) != -1) {
+	} else {
+		if (asprintf(&str, "%s?%s", desc->http_path,
+		    desc->http_query) == -1) {
+			errstr = "failed to encode param";
+			goto fail;
+		}
 		ret = fcgi_add_param(&param, "REQUEST_URI", str, clt);
 		free(str);
 		if (ret == -1) {
@@ -348,15 +356,21 @@ server_fcgi(struct httpd *env, struct client *clt)
 	}
 
 	if (param.total_len != 0) {	/* send last params record */
-		bufferevent_write(clt->clt_srvbev, &param.buf,
+		if (bufferevent_write(clt->clt_srvbev, &param.buf,
 		    sizeof(struct fcgi_record_header) +
-		    ntohs(h->content_len));
+		    ntohs(h->content_len)) == -1) {
+			errstr = "failed to write to client evbuffer";
+			goto fail;
+		}
 	}
 
 	/* send "no more params" message */
 	h->content_len = 0;
-	bufferevent_write(clt->clt_srvbev, &param.buf,
-	    sizeof(struct fcgi_record_header));
+	if (bufferevent_write(clt->clt_srvbev, &param.buf,
+	    sizeof(struct fcgi_record_header)) == -1) {
+		errstr = "failed to write to client evbuffer";
+		goto fail;
+	}
 
 	bufferevent_settimeout(clt->clt_srvbev,
 	    srv_conf->timeout.tv_sec, srv_conf->timeout.tv_sec);
@@ -435,8 +449,9 @@ fcgi_add_param(struct server_fcgi_param *p, const char *key,
 		return (-1);
 
 	if (p->total_len + len > FCGI_CONTENT_SIZE) {
-		bufferevent_write(clt->clt_srvbev, p->buf,
-		    sizeof(struct fcgi_record_header) + p->total_len);
+		if (bufferevent_write(clt->clt_srvbev, p->buf,
+		    sizeof(struct fcgi_record_header) + p->total_len) == -1)
+			return (-1);
 		p->total_len = 0;
 	}
 
@@ -480,8 +495,10 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 
 	do {
 		len = bufferevent_read(bev, buf, clt->clt_fcgi_toread);
-		/* XXX error handling */
-		evbuffer_add(clt->clt_srvevb, buf, len);
+		if (evbuffer_add(clt->clt_srvevb, buf, len) == -1) {
+			server_abort_http(clt, 500, "short write");
+			return;
+		}
 		clt->clt_fcgi_toread -= len;
 		DPRINTF("%s: len: %lu toread: %d state: %d type: %d",
 		    __func__, len, clt->clt_fcgi_toread,
@@ -573,11 +590,12 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 int
 server_fcgi_header(struct client *clt, u_int code)
 {
+	struct server_config	*srv_conf = clt->clt_srv_conf;
 	struct http_descriptor	*desc = clt->clt_descreq;
 	struct http_descriptor	*resp = clt->clt_descresp;
 	const char		*error;
 	char			 tmbuf[32];
-	struct kv		*kv, key;
+	struct kv		*kv, *cl, key;
 
 	if (desc == NULL || (error = server_httperror_byid(code)) == NULL)
 		return (-1);
@@ -586,7 +604,7 @@ server_fcgi_header(struct client *clt, u_int code)
 		return (-1);
 
 	/* Add error codes */
-	if (kv_setkey(&resp->http_pathquery, "%lu", code) == -1 ||
+	if (kv_setkey(&resp->http_pathquery, "%u", code) == -1 ||
 	    kv_set(&resp->http_pathquery, "%s", error) == -1)
 		return (-1);
 
@@ -617,6 +635,19 @@ server_fcgi_header(struct client *clt, u_int code)
 			return (-1);
 	} else if (kv_add(&resp->http_headers, "Connection", "close") == NULL)
 		return (-1);
+
+	/* HSTS header */
+	if (srv_conf->flags & SRVFLAG_SERVER_HSTS) {
+		if ((cl =
+		    kv_add(&resp->http_headers, "Strict-Transport-Security",
+		    NULL)) == NULL ||
+		    kv_set(cl, "max-age=%d%s%s", srv_conf->hsts_max_age,
+		    srv_conf->hsts_flags & HSTSFLAG_SUBDOMAINS ?
+		    "; includeSubDomains" : "",
+		    srv_conf->hsts_flags & HSTSFLAG_PRELOAD ?
+		    "; preload" : "") == -1)
+			return (-1);
+	}
 
 	/* Date header is mandatory and should be added as late as possible */
 	if (server_http_time(time(NULL), tmbuf, sizeof(tmbuf)) <= 0 ||

@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.90 2015/07/18 06:00:43 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.96 2015/08/03 11:45:17 florian Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -293,8 +293,6 @@ struct client {
 	in_port_t		 clt_port;
 	struct sockaddr_storage	 clt_ss;
 	struct bufferevent	*clt_bev;
-	char			*clt_buf;
-	size_t			 clt_buflen;
 	struct evbuffer		*clt_output;
 	struct event		 clt_ev;
 	void			*clt_descreq;
@@ -304,6 +302,7 @@ struct client {
 	int			 clt_fd;
 	struct tls		*clt_tls_ctx;
 	struct bufferevent	*clt_srvbev;
+	int			 clt_srvbev_throttled;
 
 	off_t			 clt_toread;
 	size_t			 clt_headerlen;
@@ -376,6 +375,10 @@ SPLAY_HEAD(client_tree, client);
 #define TCPFLAG_BITS						\
 	"\10\01NODELAY\02NO_NODELAY\03SACK\04NO_SACK"		\
 	"\05SOCKET_BUFFER_SIZE\06IP_TTL\07IP_MINTTL\10NO_SPLICE"
+
+#define HSTSFLAG_SUBDOMAINS	0x01
+#define HSTSFLAG_PRELOAD	0x02
+#define HSTSFLAG_BITS		"\10\01SUBDOMAINS\02PRELOAD"
 
 enum log_format {
 	LOG_FORMAT_COMMON,
@@ -458,7 +461,7 @@ struct server_config {
 	off_t			 return_uri_len;
 
 	int			 hsts_max_age;
-	int			 hsts_subdomains;
+	u_int8_t		 hsts_flags;
 
 	TAILQ_ENTRY(server_config) entry;
 };
@@ -633,8 +636,8 @@ u_int32_t	 prefixlen2mask(u_int8_t);
 int		 accept_reserve(int, struct sockaddr *, socklen_t *, int,
 		    volatile int *);
 struct kv	*kv_add(struct kvtree *, char *, char *);
-int		 kv_set(struct kv *, char *, ...);
-int		 kv_setkey(struct kv *, char *, ...);
+int		 kv_set(struct kv *, char *, ...) __attribute__((__format__ (printf, 2, 3)));
+int		 kv_setkey(struct kv *, char *, ...) __attribute__((__format__ (printf, 2, 3)));
 void		 kv_delete(struct kvtree *, struct kv *);
 struct kv	*kv_extend(struct kvtree *, struct kv *, char *);
 void		 kv_purge(struct kvtree *);

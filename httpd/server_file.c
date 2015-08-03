@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_file.c,v 1.58 2015/07/18 14:36:24 kili Exp $	*/
+/*	$OpenBSD: server_file.c,v 1.60 2015/08/03 11:45:17 florian Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -66,7 +66,7 @@ server_file_access(struct httpd *env, struct client *clt,
 	struct server_config	*srv_conf = clt->clt_srv_conf;
 	struct stat		 st;
 	struct kv		*r, key;
-	char			*newpath;
+	char			*newpath, *encodedpath;
 	int			 ret;
 
 	errno = 0;
@@ -90,10 +90,16 @@ server_file_access(struct httpd *env, struct client *clt,
 
 		/* Redirect to path with trailing "/" */
 		if (path[strlen(path) - 1] != '/') {
+			if ((encodedpath = url_encode(desc->http_path)) == NULL)
+				return (500);
 			if (asprintf(&newpath, "http%s://%s%s/",
 			    srv_conf->flags & SRVFLAG_TLS ? "s" : "",
-			    desc->http_host, desc->http_path) == -1)
+			    desc->http_host, encodedpath) == -1) {
+				free(encodedpath);
 				return (500);
+			}
+			free(encodedpath);
+
 			/* Path alias will be used for the redirection */
 			desc->http_path_alias = newpath;
 
@@ -256,6 +262,7 @@ server_file_request(struct httpd *env, struct client *clt, char *path,
 	if (clt->clt_srvbev != NULL)
 		bufferevent_free(clt->clt_srvbev);
 
+	clt->clt_srvbev_throttled = 0;
 	clt->clt_srvbev = bufferevent_new(clt->clt_fd, server_read,
 	    server_write, server_file_error, clt);
 	if (clt->clt_srvbev == NULL) {
