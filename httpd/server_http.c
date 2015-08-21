@@ -388,6 +388,7 @@ server_read_http(struct bufferevent *bev, void *arg)
 		case HTTP_METHOD_OPTIONS:
 		/* WebDAV methods */
 		case HTTP_METHOD_COPY:
+		case HTTP_METHOD_MOVE:
 			clt->clt_toread = 0;
 			break;
 		case HTTP_METHOD_POST:
