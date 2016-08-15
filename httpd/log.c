@@ -1,4 +1,4 @@
-/*	$OpenBSD: log.c,v 1.6 2015/08/20 13:00:23 reyk Exp $	*/
+/*	$OpenBSD: log.c,v 1.10 2015/12/07 12:13:51 reyk Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -11,47 +11,63 @@
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
  * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
- * IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
- * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-
-#include <errno.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <syslog.h>
+#include <errno.h>
 #include <time.h>
-#include <netdb.h>
-#include <ctype.h>
 
-#include "httpd.h"
+int		 debug;
+int		 verbose;
+const char	*log_procname;
 
-int	 debug;
-int	 verbose;
-
-void	 vlog(int, const char *, va_list)
-	    __attribute__((__format__ (printf, 2, 0)));
-void	 logit(int, const char *, ...)
+void	log_init(int, int);
+void	log_procinit(const char *);
+void	log_verbose(int);
+void	log_warn(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	log_warnx(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	log_info(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	log_debug(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	logit(int, const char *, ...)
 	    __attribute__((__format__ (printf, 2, 3)));
+void	vlog(int, const char *, va_list)
+	    __attribute__((__format__ (printf, 2, 0)));
+__dead void fatal(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+__dead void fatalx(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
 
 void
-log_init(int n_debug)
+log_init(int n_debug, int facility)
 {
 	extern char	*__progname;
 
 	debug = n_debug;
 	verbose = n_debug;
+	log_procinit(__progname);
 
 	if (!debug)
-		openlog(__progname, LOG_PID | LOG_NDELAY, LOG_DAEMON);
+		openlog(__progname, LOG_PID | LOG_NDELAY, facility);
 
 	tzset();
+}
+
+void
+log_procinit(const char *procname)
+{
+	if (procname != NULL)
+		log_procname = procname;
 }
 
 void
@@ -146,98 +162,45 @@ log_debug(const char *emsg, ...)
 	}
 }
 
-void
-fatal(const char *emsg)
+static void
+vfatal(const char *emsg, va_list ap)
 {
-	if (emsg == NULL)
-		logit(LOG_CRIT, "fatal: %s", strerror(errno));
-	else
-		if (errno)
-			logit(LOG_CRIT, "fatal: %s: %s",
-			    emsg, strerror(errno));
-		else
-			logit(LOG_CRIT, "fatal: %s", emsg);
+	static char	s[BUFSIZ];
+	const char	*sep;
 
+	if (emsg != NULL) {
+		(void)vsnprintf(s, sizeof(s), emsg, ap);
+		sep = ": ";
+	} else {
+		s[0] = '\0';
+		sep = "";
+	}
+	if (errno)
+		logit(LOG_CRIT, "%s: %s%s%s",
+		    log_procname, s, sep, strerror(errno));
+	else
+		logit(LOG_CRIT, "%s%s%s", log_procname, sep, s);
+}
+
+void
+fatal(const char *emsg, ...)
+{
+	va_list	ap;
+
+	va_start(ap, emsg);
+	vfatal(emsg, ap);
+	va_end(ap);
 	exit(1);
 }
 
 void
-fatalx(const char *emsg)
+fatalx(const char *emsg, ...)
 {
+	va_list	ap;
+
 	errno = 0;
-	fatal(emsg);
-}
-
-const char *
-print_host(struct sockaddr_storage *ss, char *buf, size_t len)
-{
-	if (getnameinfo((struct sockaddr *)ss, ss->ss_len,
-	    buf, len, NULL, 0, NI_NUMERICHOST) != 0) {
-		buf[0] = '\0';
-		return (NULL);
-	}
-	return (buf);
-}
-
-const char *
-print_time(struct timeval *a, struct timeval *b, char *buf, size_t len)
-{
-	struct timeval		tv;
-	unsigned long		h, sec, min;
-
-	timerclear(&tv);
-	timersub(a, b, &tv);
-	sec = tv.tv_sec % 60;
-	min = tv.tv_sec / 60 % 60;
-	h = tv.tv_sec / 60 / 60;
-
-	snprintf(buf, len, "%.2lu:%.2lu:%.2lu", h, min, sec);
-	return (buf);
-}
-
-const char *
-printb_flags(const uint32_t v, const char *bits)
-{
-	static char	 buf[2][BUFSIZ];
-	static int	 idx = 0;
-	int		 i, any = 0;
-	char		 c, *p, *r;
-
-	p = r = buf[++idx % 2];
-	memset(p, 0, BUFSIZ);
-
-	if (bits) {
-		bits++;
-		while ((i = *bits++)) {
-			if (v & (1 << (i - 1))) {
-				if (any) {
-					*p++ = ',';
-					*p++ = ' ';
-				}
-				any = 1;
-				for (; (c = *bits) > 32; bits++) {
-					if (c == '_')
-						*p++ = ' ';
-					else
-						*p++ =
-						    tolower((unsigned char)c);
-				}
-			} else
-				for (; *bits > 32; bits++)
-					;
-		}
-	}
-
-	return (r);
-}
-
-void
-getmonotime(struct timeval *tv)
-{
-	struct timespec	 ts;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts))
-		fatal("clock_gettime");
-
-	TIMESPEC_TO_TIMEVAL(tv, &ts);
+	va_start(ap, emsg);
+	vfatal(emsg, ap);
+	va_end(ap);
+	exit(1);
 }

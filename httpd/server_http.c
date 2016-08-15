@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.98 2015/08/21 07:30:50 reyk Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.109 2016/07/27 11:02:41 reyk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -102,26 +102,18 @@ server_httpdesc_free(struct http_descriptor *desc)
 {
 	if (desc == NULL)
 		return;
-	if (desc->http_path != NULL) {
-		free(desc->http_path);
-		desc->http_path = NULL;
-	}
-	if (desc->http_path_alias != NULL) {
-		free(desc->http_path_alias);
-		desc->http_path_alias = NULL;
-	}
-	if (desc->http_query != NULL) {
-		free(desc->http_query);
-		desc->http_query = NULL;
-	}
-	if (desc->http_version != NULL) {
-		free(desc->http_version);
-		desc->http_version = NULL;
-	}
-	if (desc->http_host != NULL) {
-		free(desc->http_host);
-		desc->http_host = NULL;
-	}
+
+	free(desc->http_path);
+	desc->http_path = NULL;
+	free(desc->http_path_alias);
+	desc->http_path_alias = NULL;
+	free(desc->http_query);
+	desc->http_query = NULL;
+	free(desc->http_version);
+	desc->http_version = NULL;
+	free(desc->http_host);
+	desc->http_host = NULL;
+
 	kv_purge(&desc->http_headers);
 	desc->http_lastheader = NULL;
 	desc->http_method = 0;
@@ -134,7 +126,7 @@ server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 	char			 decoded[1024];
 	FILE			*fp = NULL;
 	struct http_descriptor	*desc = clt->clt_descreq;
-	struct auth		*auth = srv_conf->auth;
+	const struct auth	*auth = srv_conf->auth;
 	struct kv		*ba, key;
 	size_t			 linesize = 0;
 	ssize_t			 linelen;
@@ -195,6 +187,7 @@ server_http_authenticate(struct server_config *srv_conf, struct client *clt)
 		}
 	}
 done:
+	free(line);
 	if (fp != NULL)
 		fclose(fp);
 
@@ -303,8 +296,10 @@ server_read_http(struct bufferevent *bev, void *arg)
 				goto fail;
 
 			desc->http_version = strchr(desc->http_path, ' ');
-			if (desc->http_version == NULL)
-				goto fail;
+			if (desc->http_version == NULL) {
+				server_abort_http(clt, 400, "malformed");
+				goto abort;
+			}
 
 			*desc->http_version++ = '\0';
 			desc->http_query = strchr(desc->http_path, '?');
@@ -385,12 +380,12 @@ server_read_http(struct bufferevent *bev, void *arg)
 		case HTTP_METHOD_DELETE:
 		case HTTP_METHOD_GET:
 		case HTTP_METHOD_HEAD:
-		case HTTP_METHOD_OPTIONS:
 		/* WebDAV methods */
 		case HTTP_METHOD_COPY:
 		case HTTP_METHOD_MOVE:
 			clt->clt_toread = 0;
 			break;
+		case HTTP_METHOD_OPTIONS:
 		case HTTP_METHOD_POST:
 		case HTTP_METHOD_PUT:
 		case HTTP_METHOD_RESPONSE:
@@ -597,8 +592,7 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 	case 0:
 		/* Chunk is terminated by an empty newline */
 		line = evbuffer_readln(src, NULL, EVBUFFER_EOL_CRLF_STRICT);
-		if (line != NULL)
-			free(line);
+		free(line);
 		if (server_bufferevent_print(clt, "\r\n") == -1)
 			goto fail;
 		clt->clt_toread = TOREAD_HTTP_CHUNK_LENGTH;
@@ -824,6 +818,8 @@ server_abort_http(struct client *clt, unsigned int code, const char *msg)
 	    "<!DOCTYPE html>\n"
 	    "<html>\n"
 	    "<head>\n"
+	    "<meta http-equiv=\"Content-Type\" content=\"text/html; "
+	    "charset=utf-8\"/>\n"
 	    "<title>%03d %s</title>\n"
 	    "<style type=\"text/css\"><!--\n%s\n--></style>\n"
 	    "</head>\n"
@@ -832,8 +828,10 @@ server_abort_http(struct client *clt, unsigned int code, const char *msg)
 	    "<hr>\n<address>%s</address>\n"
 	    "</body>\n"
 	    "</html>\n",
-	    code, httperr, style, code, httperr, HTTPD_SERVERNAME)) == -1)
+	    code, httperr, style, code, httperr, HTTPD_SERVERNAME)) == -1) {
+		body = NULL;
 		goto done;
+	}
 
 	if (srv_conf->flags & SRVFLAG_SERVER_HSTS) {
 		if (asprintf(&hstsheader, "Strict-Transport-Security: "
@@ -841,8 +839,10 @@ server_abort_http(struct client *clt, unsigned int code, const char *msg)
 		    srv_conf->hsts_flags & HSTSFLAG_SUBDOMAINS ?
 		    "; includeSubDomains" : "",
 		    srv_conf->hsts_flags & HSTSFLAG_PRELOAD ?
-		    "; preload" : "") == -1)
+		    "; preload" : "") == -1) {
+			hstsheader = NULL;
 			goto done;
+		}
 	}
 
 	/* Add basic HTTP headers */
@@ -918,7 +918,7 @@ server_expand_http(struct client *clt, const char *val, char *buf,
 	/* Find previously matched substrings by index */
 	for (p = val; clt->clt_srv_match.sm_nmatch &&
 	    (p = strstr(p, "%")) != NULL; p++) {
-		if (!isdigit(*(p + 1)))
+		if (!isdigit((unsigned char)*(p + 1)))
 			continue;
 
 		/* Copy number, leading '%' char and add trailing \0 */

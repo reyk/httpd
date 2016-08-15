@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.75 2015/08/20 13:00:23 reyk Exp $	*/
+/*	$OpenBSD: server.c,v 1.88 2016/08/15 16:12:34 jsing Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -65,7 +65,7 @@ void		 server_tls_readcb(int, short, void *);
 void		 server_tls_writecb(int, short, void *);
 
 void		 server_accept(int, short, void *);
-void		 server_accept_tls(int, short, void *);
+void		 server_handshake_tls(int, short, void *);
 void		 server_input(struct client *);
 void		 server_inflight_dec(struct client *, const char *);
 
@@ -133,6 +133,30 @@ server_privinit(struct server *srv)
 }
 
 int
+server_tls_cmp(struct server *s1, struct server *s2)
+{
+	struct server_config	*sc1, *sc2;
+
+	sc1 = &s1->srv_conf;
+	sc2 = &s2->srv_conf;
+
+	if (sc1->tls_protocols != sc2->tls_protocols)
+		return (-1);
+	if (strcmp(sc1->tls_cert_file, sc2->tls_cert_file) != 0)
+		return (-1);
+	if (strcmp(sc1->tls_key_file, sc2->tls_key_file) != 0)
+		return (-1);
+	if (strcmp(sc1->tls_ciphers, sc2->tls_ciphers) != 0)
+		return (-1);
+	if (strcmp(sc1->tls_dhe_params, sc2->tls_dhe_params) != 0)
+		return (-1);
+	if (strcmp(sc1->tls_ecdhe_curve, sc2->tls_ecdhe_curve) != 0)
+		return (-1);
+
+	return (0);
+}
+
+int
 server_tls_load_keypair(struct server *srv)
 {
 	if ((srv->srv_conf.flags & SRVFLAG_TLS) == 0)
@@ -162,18 +186,18 @@ server_tls_init(struct server *srv)
 	if ((srv->srv_conf.flags & SRVFLAG_TLS) == 0)
 		return (0);
 
-	log_debug("%s: setting up TLS for %s", __func__, srv->srv_conf.name);
+	log_debug("%s: setting up tls for %s", __func__, srv->srv_conf.name);
 
 	if (tls_init() != 0) {
-		log_warn("%s: failed to initialise tls", __func__);
+		log_warnx("%s: failed to initialise tls", __func__);
 		return (-1);
 	}
 	if ((srv->srv_tls_config = tls_config_new()) == NULL) {
-		log_warn("%s: failed to get tls config", __func__);
+		log_warnx("%s: failed to get tls config", __func__);
 		return (-1);
 	}
 	if ((srv->srv_tls_ctx = tls_server()) == NULL) {
-		log_warn("%s: failed to get tls server", __func__);
+		log_warnx("%s: failed to get tls server", __func__);
 		return (-1);
 	}
 
@@ -182,33 +206,33 @@ server_tls_init(struct server *srv)
 
 	if (tls_config_set_ciphers(srv->srv_tls_config,
 	    srv->srv_conf.tls_ciphers) != 0) {
-		log_warn("%s: failed to set tls ciphers", __func__);
+		log_warnx("%s: failed to set tls ciphers: %s",
+		    __func__, tls_config_error(srv->srv_tls_config));
 		return (-1);
 	}
 	if (tls_config_set_dheparams(srv->srv_tls_config,
 	    srv->srv_conf.tls_dhe_params) != 0) {
-		log_warn("%s: failed to set tls dhe params", __func__);
+		log_warnx("%s: failed to set tls dhe params: %s",
+		    __func__, tls_config_error(srv->srv_tls_config));
 		return (-1);
 	}
 	if (tls_config_set_ecdhecurve(srv->srv_tls_config,
 	    srv->srv_conf.tls_ecdhe_curve) != 0) {
-		log_warn("%s: failed to set tls ecdhe curve", __func__);
+		log_warnx("%s: failed to set tls ecdhe curve: %s",
+		    __func__, tls_config_error(srv->srv_tls_config));
 		return (-1);
 	}
 
-	if (tls_config_set_cert_mem(srv->srv_tls_config,
-	    srv->srv_conf.tls_cert, srv->srv_conf.tls_cert_len) != 0) {
-		log_warn("%s: failed to set tls cert", __func__);
-		return (-1);
-	}
-	if (tls_config_set_key_mem(srv->srv_tls_config,
+	if (tls_config_set_keypair_mem(srv->srv_tls_config,
+	    srv->srv_conf.tls_cert, srv->srv_conf.tls_cert_len,
 	    srv->srv_conf.tls_key, srv->srv_conf.tls_key_len) != 0) {
-		log_warn("%s: failed to set tls key", __func__);
+		log_warnx("%s: failed to set tls certificate/key: %s",
+		    __func__, tls_config_error(srv->srv_tls_config));
 		return (-1);
 	}
 
 	if (tls_configure(srv->srv_tls_ctx, srv->srv_tls_config) != 0) {
-		log_warn("%s: failed to configure TLS - %s", __func__,
+		log_warnx("%s: failed to configure tls - %s", __func__,
 		    tls_error(srv->srv_tls_ctx));
 		return (-1);
 	}
@@ -243,6 +267,9 @@ server_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 
 	/* Unlimited file descriptors (use system limits) */
 	socket_rlimit(-1);
+
+	if (pledge("stdio rpath inet unix recvfd", NULL) == -1)
+		fatal("pledge");
 
 #if 0
 	/* Schedule statistics timer */
@@ -313,7 +340,6 @@ server_purge(struct server *srv)
 void
 serverconfig_free(struct server_config *srv_conf)
 {
-	free(srv_conf->auth);
 	free(srv_conf->return_uri);
 	free(srv_conf->tls_cert_file);
 	free(srv_conf->tls_key_file);
@@ -392,6 +418,33 @@ server_foreach(int (*srv_cb)(struct server *,
 	return (0);
 }
 
+struct server *
+server_match(struct server *s2, int match_name)
+{
+	struct server	*s1;
+
+	/* Attempt to find matching server. */
+	TAILQ_FOREACH(s1, env->sc_servers, srv_entry) {
+		if ((s1->srv_conf.flags & SRVFLAG_LOCATION) != 0)
+			continue;
+		if (match_name) {
+			if (strcmp(s1->srv_conf.name, s2->srv_conf.name) != 0)
+				continue;
+		}
+		if (s1->srv_conf.port != s2->srv_conf.port)
+			continue;
+		if (sockaddr_cmp(
+		    (struct sockaddr *)&s1->srv_conf.ss,
+		    (struct sockaddr *)&s2->srv_conf.ss,
+		    s1->srv_conf.prefixlen) != 0)
+			continue;
+
+		return (s1);
+	}
+
+	return (NULL);
+}
+
 int
 server_socket_af(struct sockaddr_storage *ss, in_port_t port)
 {
@@ -439,7 +492,8 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 	if (server_socket_af(ss, port) == -1)
 		goto bad;
 
-	s = fd == -1 ? socket(ss->ss_family, SOCK_STREAM, IPPROTO_TCP) : fd;
+	s = fd == -1 ? socket(ss->ss_family, SOCK_STREAM | SOCK_NONBLOCK,
+	    IPPROTO_TCP) : fd;
 	if (s == -1)
 		goto bad;
 
@@ -455,8 +509,6 @@ server_socket(struct sockaddr_storage *ss, in_port_t port,
 		    sizeof(int)) == -1)
 			goto bad;
 	}
-	if (fcntl(s, F_SETFL, O_NONBLOCK) == -1)
-		goto bad;
 	if (srv_conf->tcpflags & TCPFLAG_BUFSIZ) {
 		val = srv_conf->tcpbufsiz;
 		if (setsockopt(s, SOL_SOCKET, SO_RCVBUF,
@@ -564,7 +616,7 @@ server_tls_readcb(int fd, short event, void *arg)
 	char			 rbuf[IBUF_READ_SIZE];
 	int			 what = EVBUFFER_READ;
 	int			 howmuch = IBUF_READ_SIZE;
-	int			 ret;
+	ssize_t			 ret;
 	size_t			 len;
 
 	if (event == EV_TIMEOUT) {
@@ -575,13 +627,14 @@ server_tls_readcb(int fd, short event, void *arg)
 	if (bufev->wm_read.high != 0)
 		howmuch = MINIMUM(sizeof(rbuf), bufev->wm_read.high);
 
-	ret = tls_read(clt->clt_tls_ctx, rbuf, howmuch, &len);
-	if (ret == TLS_READ_AGAIN || ret == TLS_WRITE_AGAIN) {
+	ret = tls_read(clt->clt_tls_ctx, rbuf, howmuch);
+	if (ret == TLS_WANT_POLLIN || ret == TLS_WANT_POLLOUT) {
 		goto retry;
-	} else if (ret != 0) {
+	} else if (ret < 0) {
 		what |= EVBUFFER_ERROR;
 		goto err;
 	}
+	len = ret;
 
 	if (len == 0) {
 		what |= EVBUFFER_EOF;
@@ -622,7 +675,7 @@ server_tls_writecb(int fd, short event, void *arg)
 {
 	struct bufferevent	*bufev = arg;
 	struct client		*clt = bufev->cbarg;
-	int			 ret;
+	ssize_t			 ret;
 	short			 what = EVBUFFER_WRITE;
 	size_t			 len;
 
@@ -634,13 +687,14 @@ server_tls_writecb(int fd, short event, void *arg)
 	if (EVBUFFER_LENGTH(bufev->output)) {
 		ret = tls_write(clt->clt_tls_ctx,
 		    EVBUFFER_DATA(bufev->output),
-		    EVBUFFER_LENGTH(bufev->output), &len);
-		if (ret == TLS_READ_AGAIN || ret == TLS_WRITE_AGAIN) {
+		    EVBUFFER_LENGTH(bufev->output));
+		if (ret == TLS_WANT_POLLIN || ret == TLS_WANT_POLLOUT) {
 			goto retry;
-		} else if (ret != 0) {
+		} else if (ret < 0) {
 			what |= EVBUFFER_ERROR;
 			goto err;
 		}
+		len = ret;
 		evbuffer_drain(bufev->output, len);
 	}
 
@@ -742,8 +796,6 @@ server_write(struct bufferevent *bev, void *arg)
 void
 server_dump(struct client *clt, const void *buf, size_t len)
 {
-	size_t			 outlen;
-
 	if (!len)
 		return;
 
@@ -754,7 +806,7 @@ server_dump(struct client *clt, const void *buf, size_t len)
 	 * error message before gracefully closing the client.
 	 */
 	if (clt->clt_tls_ctx != NULL)
-		(void)tls_write(clt->clt_tls_ctx, buf, len, &outlen);
+		(void)tls_write(clt->clt_tls_ctx, buf, len);
 	else
 		(void)write(clt->clt_s, buf, len);
 }
@@ -857,9 +909,6 @@ server_accept(int fd, short event, void *arg)
 	if (server_clients >= SERVER_MAX_CLIENTS)
 		goto err;
 
-	if (fcntl(s, F_SETFL, O_NONBLOCK) == -1)
-		goto err;
-
 	if ((clt = calloc(1, sizeof(*clt))) == NULL)
 		goto err;
 
@@ -916,8 +965,13 @@ server_accept(int fd, short event, void *arg)
 	}
 
 	if (srv->srv_conf.flags & SRVFLAG_TLS) {
+		if (tls_accept_socket(srv->srv_tls_ctx, &clt->clt_tls_ctx,
+		    clt->clt_s) != 0) {
+			server_close(clt, "failed to setup tls context");
+			return;
+		}
 		event_again(&clt->clt_ev, clt->clt_s, EV_TIMEOUT|EV_READ,
-		    server_accept_tls, &clt->clt_tv_start,
+		    server_handshake_tls, &clt->clt_tv_start,
 		    &srv->srv_conf.timeout, clt);
 		return;
 	}
@@ -938,39 +992,36 @@ server_accept(int fd, short event, void *arg)
 }
 
 void
-server_accept_tls(int fd, short event, void *arg)
+server_handshake_tls(int fd, short event, void *arg)
 {
 	struct client *clt = (struct client *)arg;
 	struct server *srv = (struct server *)clt->clt_srv;
 	int ret;
 
 	if (event == EV_TIMEOUT) {
-		server_close(clt, "TLS accept timeout");
+		server_close(clt, "tls handshake timeout");
 		return;
 	}
 
-	if (srv->srv_tls_ctx == NULL)
+	if (srv->srv_tls_ctx == NULL || clt->clt_tls_ctx == NULL)
 		fatalx("NULL tls context");
 
-	ret = tls_accept_socket(srv->srv_tls_ctx, &clt->clt_tls_ctx,
-	    clt->clt_s);
-	if (ret == TLS_READ_AGAIN) {
+	ret = tls_handshake(clt->clt_tls_ctx);
+	if (ret == 0) {
+		server_input(clt);
+	} else if (ret == TLS_WANT_POLLIN) {
 		event_again(&clt->clt_ev, clt->clt_s, EV_TIMEOUT|EV_READ,
-		    server_accept_tls, &clt->clt_tv_start,
+		    server_handshake_tls, &clt->clt_tv_start,
 		    &srv->srv_conf.timeout, clt);
-	} else if (ret == TLS_WRITE_AGAIN) {
+	} else if (ret == TLS_WANT_POLLOUT) {
 		event_again(&clt->clt_ev, clt->clt_s, EV_TIMEOUT|EV_WRITE,
-		    server_accept_tls, &clt->clt_tv_start,
+		    server_handshake_tls, &clt->clt_tv_start,
 		    &srv->srv_conf.timeout, clt);
-	} else if (ret != 0) {
-		log_warnx("%s: TLS accept failed - %s", __func__,
-		    tls_error(srv->srv_tls_ctx));
-		server_close(clt, "TLS accept failed");
-		return;
+	} else {
+		log_warnx("%s: tls handshake failed - %s", __func__,
+		    tls_error(clt->clt_tls_ctx));
+		server_close(clt, "tls handshake failed");
 	}
-
-	server_input(clt);
-	return;
 }
 
 void
@@ -1020,8 +1071,7 @@ server_sendlog(struct server_config *srv_conf, int cmd, const char *emsg, ...)
 	iov[1].iov_base = msg;
 	iov[1].iov_len = strlen(msg) + 1;
 
-	if (proc_composev_imsg(env->sc_ps, PROC_LOGGER, -1, cmd, -1, iov,
-	    2) != 0) {
+	if (proc_composev(env->sc_ps, PROC_LOGGER, cmd, iov, 2) != 0) {
 		log_warn("%s: failed to compose imsg", __func__);
 		return;
 	}

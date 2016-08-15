@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.97 2015/08/20 13:00:23 reyk Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.106 2016/08/15 16:12:34 jsing Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -52,7 +52,7 @@
 #define HTTPD_LOGVIS		VIS_NL|VIS_TAB|VIS_CSTYLE
 #define HTTPD_TLS_CERT		"/etc/ssl/server.crt"
 #define HTTPD_TLS_KEY		"/etc/ssl/private/server.key"
-#define HTTPD_TLS_CIPHERS	"HIGH:!aNULL"
+#define HTTPD_TLS_CIPHERS	"compat"
 #define HTTPD_TLS_DHE_PARAMS	"none"
 #define HTTPD_TLS_ECDHE_CURVE	"auto"
 #define FD_RESERVE		5
@@ -163,11 +163,6 @@ struct {
 	struct event	 ev;
 	int		 fd;
 } control_state;
-
-enum blockmodes {
-	BM_NORMAL,
-	BM_NONBLOCK
-};
 
 struct imsgev {
 	struct imsgbuf		 ibuf;
@@ -454,7 +449,7 @@ struct server_config {
 
 	char			 auth_realm[NAME_MAX];
 	uint32_t		 auth_id;
-	struct auth		*auth;
+	const struct auth	*auth;
 
 	int			 return_code;
 	char			*return_uri;
@@ -469,9 +464,6 @@ TAILQ_HEAD(serverhosts, server_config);
 
 struct tls_config {
 	uint32_t		 id;
-
-	in_port_t		 port;
-	struct sockaddr_storage	 ss;
 
 	size_t			 tls_cert_len;
 	size_t			 tls_key_len;
@@ -524,7 +516,6 @@ void	 control_dispatch_imsg(int, short, void *);
 void	 control_imsg_forward(struct imsg *);
 struct ctl_conn	*
 	 control_connbyfd(int);
-void	 socket_set_blockmode(int, enum blockmodes);
 
 extern  struct ctl_connlist ctl_conns;
 
@@ -535,6 +526,7 @@ int	 cmdline_symset(char *);
 
 /* server.c */
 pid_t	 server(struct privsep *, struct privsep_proc *);
+int	 server_tls_cmp(struct server *, struct server *);
 int	 server_tls_load_keypair(struct server *);
 int	 server_privinit(struct server *);
 void	 server_purge(struct server *);
@@ -569,6 +561,8 @@ struct server_config *
 	 serverconfig_byid(uint32_t);
 int	 server_foreach(int (*)(struct server *,
 	    struct server_config *, void *), void *);
+struct server *
+	 server_match(struct server *, int);
 
 SPLAY_PROTOTYPE(client_tree, client, clt_nodes, server_client_cmp);
 
@@ -664,22 +658,31 @@ RB_PROTOTYPE(mediatypes, media_type, media_entry, media_cmp);
 struct auth	*auth_add(struct serverauth *, struct auth *);
 struct auth	*auth_byid(struct serverauth *, uint32_t);
 void		 auth_free(struct serverauth *, struct auth *);
+const char	*print_host(struct sockaddr_storage *, char *, size_t);
+const char	*print_time(struct timeval *, struct timeval *, char *, size_t);
+const char	*printb_flags(const uint32_t, const char *);
+void		 getmonotime(struct timeval *);
 
 /* log.c */
-void	log_init(int);
+void	log_init(int, int);
+void	log_procinit(const char *);
 void	log_verbose(int);
-void	log_warn(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
-void	log_warnx(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
-void	log_info(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
-void	log_debug(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
-void	logit(int, const char *, ...) __attribute__((__format__ (printf, 2, 3)));
-void	vlog(int, const char *, va_list) __attribute__((__format__ (printf, 2, 0)));
-__dead void fatal(const char *);
-__dead void fatalx(const char *);
-const char *print_host(struct sockaddr_storage *, char *, size_t);
-const char *print_time(struct timeval *, struct timeval *, char *, size_t);
-const char *printb_flags(const uint32_t, const char *);
-void	 getmonotime(struct timeval *);
+void	log_warn(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	log_warnx(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	log_info(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	log_debug(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+void	logit(int, const char *, ...)
+	    __attribute__((__format__ (printf, 2, 3)));
+void	vlog(int, const char *, va_list)
+	    __attribute__((__format__ (printf, 2, 0)));
+__dead void fatal(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
+__dead void fatalx(const char *, ...)
+	    __attribute__((__format__ (printf, 1, 2)));
 
 /* proc.c */
 void	 proc_init(struct privsep *, struct privsep_proc *, unsigned int);
@@ -691,9 +694,13 @@ pid_t	 proc_run(struct privsep *, struct privsep_proc *,
 	    void (*)(struct privsep *, struct privsep_proc *, void *), void *);
 void	 proc_range(struct privsep *, enum privsep_procid, int *, int *);
 int	 proc_compose_imsg(struct privsep *, enum privsep_procid, int,
-	    uint16_t, int, void *, uint16_t);
+	    u_int16_t, u_int32_t, int, void *, u_int16_t);
+int	 proc_compose(struct privsep *, enum privsep_procid,
+	    uint16_t, void *, uint16_t);
 int	 proc_composev_imsg(struct privsep *, enum privsep_procid, int,
-	    uint16_t, int, const struct iovec *, int);
+	    u_int16_t, u_int32_t, int, const struct iovec *, int);
+int	 proc_composev(struct privsep *, enum privsep_procid,
+	    uint16_t, const struct iovec *, int);
 int	 proc_forward_imsg(struct privsep *, struct imsg *,
 	    enum privsep_procid, int);
 struct imsgbuf *

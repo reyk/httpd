@@ -1,4 +1,4 @@
-.\"	$OpenBSD: httpd.conf.5,v 1.68 2015/07/19 05:17:27 reyk Exp $
+.\"	$OpenBSD: httpd.conf.5,v 1.73 2016/05/09 19:36:54 tj Exp $
 .\"
 .\" Copyright (c) 2014, 2015 Reyk Floeter <reyk@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: July 19 2015 $
+.Dd $Mdocdate: May 9 2016 $
 .Dt HTTPD.CONF 5
 .Os
 .Sh NAME
@@ -274,6 +274,67 @@ root directory of
 .Xr httpd 8
 and defaults to
 .Pa /run/slowcgi.sock .
+.Pp
+The FastCGI handler will be given the following variables:
+.Pp
+.Bl -tag -width GATEWAY_INTERFACE -offset indent -compact
+.It Ic DOCUMENT_ROOT
+The document root in which the script is located as configured by the
+.Ic root
+option for the server or location that matches the request.
+.It Ic GATEWAY_INTERFACE
+The revision of the CGI specification used.
+.It Ic HTTP_*
+Additional HTTP headers the connected client sent in the request, if
+any.
+.It Ic HTTPS
+A variable that is set to
+.Qq on
+when the server has been configured to use TLS.
+This variable is omitted otherwise.
+.It Ic REQUEST_URI
+The path and optional query string as requested by the connected client.
+.It Ic DOCUMENT_URI
+The canonicalized request path, possibly with a slash or
+directory index file name appended.
+This is the same as
+.Ic PATH_INFO
+appended to
+.Ic SCRIPT_NAME .
+.It Ic SCRIPT_NAME
+The virtual URI path to the script.
+.It Ic PATH_INFO
+The optional path appended after the script name in the request path.
+This variable is an empty string if no path is appended after the
+script name.
+.It Ic SCRIPT_FILENAME
+The absolute, physical path to the script within the
+.Xr chroot 2
+directory.
+.It Ic QUERY_STRING
+The optional query string of the request.
+This variable is an empty
+string if there is no query string in the request.
+.It Ic REMOTE_ADDR
+The IP address of the connected client.
+.It Ic REMOTE_PORT
+The TCP source port of the connected client.
+.It Ic REMOTE_USER
+The remote user when using HTTP authentication.
+.It Ic REQUEST_METHOD
+The HTTP method the connected client used when making the request.
+.It Ic SERVER_ADDR
+The configured IP address of the server.
+.It Ic SERVER_NAME
+The name of the server.
+.It Ic SERVER_PORT
+The configured TCP server port of the server.
+.It Ic SERVER_PROTOCOL
+The revision of the HTTP specification used.
+.It Ic SERVER_SOFTWARE
+The server software name of
+.Xr httpd 8 .
+.El
 .It Ic hsts Oo Ar option Oc
 Enable HTTP Strict Transport Security.
 Valid options are:
@@ -299,11 +360,14 @@ The
 argument will be matched against the request path with shell globbing rules.
 A location section may include most of the server configuration rules
 except
+.Ic alias ,
 .Ic connection ,
+.Ic hsts ,
 .Ic listen on ,
-.Ic location
+.Ic location ,
+.Ic tcp
 and
-.Ic tcp .
+.Ic tls .
 .It Ic location match Ar path Brq ...
 Like the
 .Ic location
@@ -530,7 +594,7 @@ server "default" {
 types {
 	text/css		css
 	text/html		html htm
-	text/txt		txt
+	text/plain		txt
 	image/gif		gif
 	image/jpeg		jpeg jpg
 	image/png		png
@@ -584,7 +648,7 @@ directive:
 .Bd -literal -offset indent
 server "example.com" {
 	listen on 10.0.0.1 port 80
-	block return 301 "http://www.example.com/"
+	block return 301 "http://www.example.com$REQUEST_URI"
 }
 
 server "www.example.com" {
