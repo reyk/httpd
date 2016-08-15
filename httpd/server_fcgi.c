@@ -99,6 +99,8 @@ server_fcgi(struct httpd *env, struct client *clt)
 	const char			*stripped, *p, *alias, *errstr = NULL;
 	char				*str, *script = NULL;
 
+	clt->clt_persist_running = __func__;
+
 	if (srv_conf->socket[0] == ':') {
 		struct sockaddr_storage	 ss;
 		in_port_t		 port;
@@ -575,11 +577,18 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 				clt->clt_fcgi_state = FCGI_READ_HEADER;
 				clt->clt_fcgi_toread =
 				    sizeof(struct fcgi_record_header);
+// variant a 1/2:
+//				if (clt->clt_fcgi_end)
+//					server_reset_http(clt,
+//					    "FCGI_READ_CONTENT");
 			} else {
 				clt->clt_fcgi_state = FCGI_READ_PADDING;
 				clt->clt_fcgi_toread =
 				    clt->clt_fcgi_padding_len;
 			}
+// variant b 1/1:
+//			if (clt->clt_fcgi_type == FCGI_END_REQUEST)
+//				server_reset_http(clt, "FCGI_END_REQUEST");
 			break;
 		case FCGI_READ_PADDING:
 			evbuffer_drain(clt->clt_srvevb,
@@ -587,6 +596,9 @@ server_fcgi_read(struct bufferevent *bev, void *arg)
 			clt->clt_fcgi_state = FCGI_READ_HEADER;
 			clt->clt_fcgi_toread =
 			    sizeof(struct fcgi_record_header);
+// variant a 2/2:
+//			if (clt->clt_fcgi_end)
+//				server_reset_http(clt, "FCGI_READ_PADDING");
 			break;
 		}
 	} while (len > 0);

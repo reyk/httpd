@@ -302,6 +302,7 @@ struct client {
 	off_t			 clt_toread;
 	size_t			 clt_headerlen;
 	unsigned int		 clt_persist;
+	const char		*clt_persist_running;
 	int			 clt_line;
 	int			 clt_done;
 	int			 clt_chunk;
@@ -586,7 +587,7 @@ int	 server_headers(struct client *, void *,
 int	 server_writeresponse_http(struct client *);
 int	 server_response_http(struct client *, unsigned int, struct media_type *,
 	    off_t, time_t);
-void	 server_reset_http(struct client *);
+void	 server_reset_http(struct client *, const char *);
 void	 server_close_http(struct client *);
 int	 server_response(struct httpd *, struct client *);
 const char *

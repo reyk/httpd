@@ -280,7 +280,7 @@ server_file_request(struct httpd *env, struct client *clt, char *path,
 	bufferevent_disable(clt->clt_bev, EV_READ);
 
  done:
-	server_reset_http(clt);
+	server_reset_http(clt, __func__);
 	return (0);
  fail:
 	bufferevent_disable(clt->clt_bev, EV_READ|EV_WRITE);
@@ -420,7 +420,7 @@ server_partial_file_request(struct httpd *env, struct client *clt, char *path,
 	clt->clt_done = 0;
 
  done:
-	server_reset_http(clt);
+	server_reset_http(clt, __func__);
 	return (0);
  fail:
 	bufferevent_disable(clt->clt_bev, EV_READ|EV_WRITE);
@@ -583,7 +583,7 @@ server_file_index(struct httpd *env, struct client *clt, struct stat *st)
 	clt->clt_done = 0;
 
  done:
-	server_reset_http(clt);
+	server_reset_http(clt, __func__);
 	return (0);
  fail:
 	bufferevent_disable(clt->clt_bev, EV_READ|EV_WRITE);
@@ -627,7 +627,7 @@ server_file_error(struct bufferevent *bev, short error, void *arg)
 				close(clt->clt_fd);
 			clt->clt_fd = -1;
 			clt->clt_toread = TOREAD_HTTP_HEADER;
-			server_reset_http(clt);
+			server_reset_http(clt, __func__);
 			bufferevent_enable(clt->clt_bev, EV_READ|EV_WRITE);
 			return;
 		}

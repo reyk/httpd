@@ -615,9 +615,12 @@ server_read_httpchunks(struct bufferevent *bev, void *arg)
 }
 
 void
-server_reset_http(struct client *clt)
+server_reset_http(struct client *clt, const char *from)
 {
 	struct server		*srv = clt->clt_srv;
+
+	log_debug("%s: called from %s", __func__, from);
+	clt->clt_persist_running = NULL;
 
 	server_log(clt, NULL);
 
@@ -1091,6 +1094,10 @@ server_response(struct httpd *httpd, struct client *clt)
 		else
 			clt->clt_persist = 0;
 	}
+
+	if (clt->clt_persist_running)
+		log_warnx("%s: request %d in %s not finished",
+		    __func__, clt->clt_persist, clt->clt_persist_running);
 
 	if (clt->clt_persist >= srv_conf->maxrequests)
 		clt->clt_persist = 0;
