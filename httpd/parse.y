@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.80 2016/08/15 16:12:34 jsing Exp $	*/
+/*	$OpenBSD: parse.y,v 1.91 2017/08/11 18:48:56 jsing Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -130,10 +130,10 @@ typedef struct {
 %}
 
 %token	ACCESS ALIAS AUTO BACKLOG BODY BUFFER CERTIFICATE CHROOT CIPHERS COMMON
-%token	COMBINED CONNECTION DHE DIRECTORY ECDHE ERR FCGI INDEX IP KEY LISTEN
-%token	LOCATION LOG LOGDIR MATCH MAXIMUM NO NODELAY ON PORT PREFORK PROTOCOLS
-%token	REQUEST REQUESTS ROOT SACK SERVER SOCKET STRIP STYLE SYSLOG TCP TIMEOUT
-%token	TLS TYPE TYPES HSTS MAXAGE SUBDOMAINS DEFAULT PRELOAD
+%token	COMBINED CONNECTION DHE DIRECTORY ECDHE ERR FCGI INDEX IP KEY LIFETIME
+%token	LISTEN LOCATION LOG LOGDIR MATCH MAXIMUM NO NODELAY OCSP ON PORT PREFORK
+%token	PROTOCOLS REQUESTS ROOT SACK SERVER SOCKET STRIP STYLE SYSLOG TCP TICKET
+%token	TIMEOUT TLS TYPE TYPES HSTS MAXAGE SUBDOMAINS DEFAULT PRELOAD REQUEST
 %token	ERROR INCLUDE AUTHENTICATE WITH BLOCK DROP RETURN PASS
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
@@ -193,7 +193,7 @@ opttls		: /*empty*/	{ $$ = 0; }
 main		: PREFORK NUMBER	{
 			if (loadcfg)
 				break;
-			if ($2 <= 0 || $2 > SERVER_MAXPROC) {
+			if ($2 <= 0 || $2 > PROC_MAX_INSTANCES) {
 				yyerror("invalid number of preforked "
 				    "servers: %lld", $2);
 				YYERROR;
@@ -245,6 +245,8 @@ server		: SERVER optmatch STRING	{
 			s->srv_conf.parent_id = s->srv_conf.id;
 			s->srv_s = -1;
 			s->srv_conf.timeout.tv_sec = SERVER_TIMEOUT;
+			s->srv_conf.requesttimeout.tv_sec =
+			    SERVER_REQUESTTIMEOUT;
 			s->srv_conf.maxrequests = SERVER_MAXREQUESTS;
 			s->srv_conf.maxrequestbody = SERVER_MAXREQUESTBODY;
 			s->srv_conf.flags = SRVFLAG_LOG;
@@ -264,9 +266,9 @@ server		: SERVER optmatch STRING	{
 			strlcpy(s->srv_conf.tls_dhe_params,
 			    HTTPD_TLS_DHE_PARAMS,
 			    sizeof(s->srv_conf.tls_dhe_params));
-			strlcpy(s->srv_conf.tls_ecdhe_curve,
-			    HTTPD_TLS_ECDHE_CURVE,
-			    sizeof(s->srv_conf.tls_ecdhe_curve));
+			strlcpy(s->srv_conf.tls_ecdhe_curves,
+			    HTTPD_TLS_ECDHE_CURVES,
+			    sizeof(s->srv_conf.tls_ecdhe_curves));
 
 			s->srv_conf.hsts_max_age = SERVER_HSTS_DEFAULT_AGE;
 
@@ -314,7 +316,7 @@ server		: SERVER optmatch STRING	{
 					free(srv);
 					YYERROR;
 				}
-				if (server_tls_cmp(s, srv) != 0) {
+				if (server_tls_cmp(s, srv, 0) != 0) {
 					yyerror("server \"%s\": tls "
 					    "configuration mismatch on same "
 					    "address/port",
@@ -337,6 +339,14 @@ server		: SERVER optmatch STRING	{
 			if (server_tls_load_keypair(srv) == -1) {
 				yyerror("server \"%s\": failed to load "
 				    "public/private keys", srv->srv_conf.name);
+				serverconfig_free(srv_conf);
+				free(srv);
+				YYERROR;
+			}
+
+			if (server_tls_load_ocsp(srv) == -1) {
+				yyerror("server \"%s\": failed to load "
+				    "ocsp staple", srv->srv_conf.name);
 				serverconfig_free(srv_conf);
 				free(srv);
 				YYERROR;
@@ -678,6 +688,10 @@ conflags	: TIMEOUT timeout		{
 			memcpy(&srv_conf->timeout, &$2,
 			    sizeof(struct timeval));
 		}
+		| REQUEST TIMEOUT timeout	{
+			memcpy(&srv_conf->requesttimeout, &$3,
+			    sizeof(struct timeval));
+		}
 		| MAXIMUM REQUESTS NUMBER	{
 			srv_conf->maxrequests = $3;
 		}
@@ -706,6 +720,13 @@ tlsopts		: CERTIFICATE STRING		{
 				fatal("out of memory");
 			free($2);
 		}
+		| OCSP STRING			{
+			free(srv_conf->tls_ocsp_staple_file);
+			if ((srv_conf->tls_ocsp_staple_file = strdup($2))
+			    == NULL)
+				fatal("out of memory");
+			free($2);
+		}
 		| CIPHERS STRING		{
 			if (strlcpy(srv_conf->tls_ciphers, $2,
 			    sizeof(srv_conf->tls_ciphers)) >=
@@ -727,9 +748,9 @@ tlsopts		: CERTIFICATE STRING		{
 			free($2);
 		}
 		| ECDHE STRING			{
-			if (strlcpy(srv_conf->tls_ecdhe_curve, $2,
-			    sizeof(srv_conf->tls_ecdhe_curve)) >=
-			    sizeof(srv_conf->tls_ecdhe_curve)) {
+			if (strlcpy(srv_conf->tls_ecdhe_curves, $2,
+			    sizeof(srv_conf->tls_ecdhe_curves)) >=
+			    sizeof(srv_conf->tls_ecdhe_curves)) {
 				yyerror("ecdhe too long");
 				free($2);
 				YYERROR;
@@ -744,6 +765,23 @@ tlsopts		: CERTIFICATE STRING		{
 				YYERROR;
 			}
 			free($2);
+		}
+		| TICKET LIFETIME DEFAULT	{
+			srv_conf->tls_ticket_lifetime = SERVER_DEF_TLS_LIFETIME;
+		}
+		| TICKET LIFETIME NUMBER	{
+			if ($3 != 0 && $3 < SERVER_MIN_TLS_LIFETIME) {
+				yyerror("ticket lifetime too small");
+				YYERROR;
+			}
+			if ($3 > SERVER_MAX_TLS_LIFETIME) {
+				yyerror("ticket lifetime too large");
+				YYERROR;
+			}
+			srv_conf->tls_ticket_lifetime = $3;
+		}
+		| NO TICKET			{
+			srv_conf->tls_ticket_lifetime = 0;
 		}
 		;
 
@@ -1197,6 +1235,7 @@ lookup(char *s)
 		{ "index",		INDEX },
 		{ "ip",			IP },
 		{ "key",		KEY },
+		{ "lifetime",		LIFETIME },
 		{ "listen",		LISTEN },
 		{ "location",		LOCATION },
 		{ "log",		LOG },
@@ -1206,6 +1245,7 @@ lookup(char *s)
 		{ "max-age",		MAXAGE },
 		{ "no",			NO },
 		{ "nodelay",		NODELAY },
+		{ "ocsp",		OCSP },
 		{ "on",			ON },
 		{ "pass",		PASS },
 		{ "port",		PORT },
@@ -1224,6 +1264,7 @@ lookup(char *s)
 		{ "subdomains",		SUBDOMAINS },
 		{ "syslog",		SYSLOG },
 		{ "tcp",		TCP },
+		{ "ticket",		TICKET },
 		{ "timeout",		TIMEOUT },
 		{ "tls",		TLS },
 		{ "type",		TYPE },
@@ -1582,8 +1623,7 @@ parse_config(const char *filename, struct httpd *x_conf)
 	endprotoent();
 
 	/* Free macros */
-	for (sym = TAILQ_FIRST(&symhead); sym != NULL; sym = next) {
-		next = TAILQ_NEXT(sym, entry);
+	TAILQ_FOREACH_SAFE(sym, &symhead, entry, next) {
 		if (!sym->persist) {
 			free(sym->nam);
 			free(sym->val);
@@ -1673,9 +1713,10 @@ symset(const char *nam, const char *val, int persist)
 {
 	struct sym	*sym;
 
-	for (sym = TAILQ_FIRST(&symhead); sym && strcmp(nam, sym->nam);
-	    sym = TAILQ_NEXT(sym, entry))
-		;	/* nothing */
+	TAILQ_FOREACH(sym, &symhead, entry) {
+		if (strcmp(nam, sym->nam) == 0)
+			break;
+	}
 
 	if (sym != NULL) {
 		if (sym->persist == 1)
@@ -1734,11 +1775,12 @@ symget(const char *nam)
 {
 	struct sym	*sym;
 
-	TAILQ_FOREACH(sym, &symhead, entry)
+	TAILQ_FOREACH(sym, &symhead, entry) {
 		if (strcmp(nam, sym->nam) == 0) {
 			sym->used = 1;
 			return (sym->val);
 		}
+	}
 	return (NULL);
 }
 
@@ -2007,10 +2049,11 @@ server_inherit(struct server *src, struct server_config *alias,
 	if ((dst->srv_conf.tls_key_file =
 	    strdup(src->srv_conf.tls_key_file)) == NULL)
 		fatal("out of memory");
-	dst->srv_conf.tls_cert = NULL;
-	dst->srv_conf.tls_key = NULL;
-	dst->srv_conf.tls_cert_len = 0;
-	dst->srv_conf.tls_key_len = 0;
+	if (src->srv_conf.tls_ocsp_staple_file != NULL) {
+		if ((dst->srv_conf.tls_ocsp_staple_file =
+		    strdup(src->srv_conf.tls_ocsp_staple_file)) == NULL)
+			fatal("out of memory");
+	}
 
 	if (src->srv_conf.return_uri != NULL &&
 	    (dst->srv_conf.return_uri =
@@ -2044,6 +2087,14 @@ server_inherit(struct server *src, struct server_config *alias,
 
 	if (server_tls_load_keypair(dst) == -1) {
 		yyerror("failed to load public/private keys "
+		    "for server %s", dst->srv_conf.name);
+		serverconfig_free(&dst->srv_conf);
+		free(dst);
+		return (NULL);
+	}
+
+	if (server_tls_load_ocsp(dst) == -1) {
+		yyerror("failed to load ocsp staple "
 		    "for server %s", dst->srv_conf.name);
 		serverconfig_free(&dst->srv_conf);
 		free(dst);

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.2 2015/07/16 17:00:41 reyk Exp $
+#	$OpenBSD: Makefile,v 1.8 2017/07/14 13:31:44 bluhm Exp $
 
 # The following ports must be installed for the regression tests:
 # p5-IO-Socket-INET6	object interface for AF_INET and AF_INET6 domain sockets
@@ -17,17 +17,8 @@ PERL_REQUIRE !=	perl -Mstrict -Mwarnings -e ' \
 regress:
 	@echo "${PERL_REQUIRE}"
 	@echo install these perl packages for additional tests
+	@echo SKIPPED
 .endif
-
-# Fill out these variables if you want to test httpd with
-# the httpd process running on a remote machine.  You have to specify
-# a local and remote ip address for the tcp connections.  To control
-# the remote machine you need a hostname for ssh to log in.  All the
-# test files must be in the same directory local and remote.
-
-LOCAL_ADDR ?=
-REMOTE_ADDR ?=
-REMOTE_SSH ?=
 
 # Automatically generate regress targets from test cases in directory.
 
@@ -37,10 +28,10 @@ REGRESS_TARGETS =	${TARGETS:S/^/run-regress-/}
 CLEANFILES +=		*.log httpd.conf ktrace.out stamp-*
 CLEANFILES +=		*.pem *.req *.crt *.key *.srl md5-*
 
-HTDOCS =		512 1048576 1073741824
-HTDOCS_MD5 =		${HTDOCS:S/^/${.OBJDIR}\/md5-/}
+HTDOCS_FILES =		512 1048576 1073741824
+HTDOCS_MD5 =		${HTDOCS_FILES:S,^,md5-,}
 HTDOCS_SPARSE =		yes
-CLEANFILES +=		${HTDOCS}
+CLEANFILES +=		htdocs/*
 
 # Set variables so that make runs with and without obj directory.
 # Only do that if necessary to keep visible output short.
@@ -62,19 +53,20 @@ run-regress-$a: $a ${HTDOCS_MD5}
 	time SUDO=${SUDO} KTRACE=${KTRACE} HTTPD=${HTTPD} perl ${PERLINC} ${PERLPATH}httpd.pl ${.OBJDIR} ${PERLPATH}$a
 .endfor
 
-# htdocs
+# populate htdocs
 
-.for d in ${HTDOCS}
-${.OBJDIR}/$d:
+.for d in ${HTDOCS_FILES}
+htdocs/$d:
 	@echo '\n======== file: $d ========'
+	mkdir -m 0755 -p ${@:H}
 .if (${HTDOCS_SPARSE} != "yes")
-	@dd if=/dev/arandom of=$@ count=$$(($d / 512)) bs=512
+	dd if=/dev/arandom of=$@ count=$$(($d / 512)) bs=512
 .else
-	@dd of=$@ seek=$$(($d / 512)) bs=512 count=0 status=none
+	dd of=$@ seek=$$(($d / 512)) bs=512 count=0 status=none
 .endif
 
-${.OBJDIR}/md5-$d: ${.OBJDIR}/$d
-	@md5 -q ${.OBJDIR}/$d > $@
+md5-$d: htdocs/$d
+	md5 -q htdocs/$d >$@
 .endfor
 
 # create certificates for TLS

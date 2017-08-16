@@ -7,11 +7,11 @@ our %args = (
 	    my $self = shift;
 	    print "GET /\r\n\r\n";
 	},
-        nocheck => 1
+	nocheck => 1
     },
     httpd => {
 	loggrep => {
-	    qr/"GET \/" 500 0/ => 1,
+	    qr/"GET \/" 400 0/ => 1,
 	},
     },
 );

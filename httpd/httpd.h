@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.106 2016/08/15 16:12:34 jsing Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.134 2017/08/11 18:48:56 jsing Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -28,6 +28,7 @@
 #include <sys/time.h>
 
 #include <net/if.h>
+#include <netinet/in.h>
 
 #include <stdarg.h>
 #include <limits.h>
@@ -37,6 +38,10 @@
 #include <vis.h>
 
 #include "patterns.h"
+
+#ifndef nitems
+#define nitems(_a) (sizeof((_a)) / sizeof((_a)[0]))
+#endif
 
 #define CONF_FILE		"/etc/httpd.conf"
 #define HTTPD_SOCKET		"/var/run/httpd.sock"
@@ -54,14 +59,14 @@
 #define HTTPD_TLS_KEY		"/etc/ssl/private/server.key"
 #define HTTPD_TLS_CIPHERS	"compat"
 #define HTTPD_TLS_DHE_PARAMS	"none"
-#define HTTPD_TLS_ECDHE_CURVE	"auto"
+#define HTTPD_TLS_ECDHE_CURVES	"default"
 #define FD_RESERVE		5
 
 #define SERVER_MAX_CLIENTS	1024
 #define SERVER_TIMEOUT		600
+#define SERVER_REQUESTTIMEOUT	60
 #define SERVER_CACHESIZE	-1	/* use default size */
 #define SERVER_NUMPROC		3
-#define SERVER_MAXPROC		32
 #define SERVER_MAXHEADERLENGTH	8192
 #define SERVER_MAXREQUESTS	100	/* max requests per connection */
 #define SERVER_MAXREQUESTBODY	1048576	/* 1M */
@@ -70,6 +75,10 @@
 #define SERVER_MAX_PREFETCH	256
 #define SERVER_MIN_PREFETCHED	32
 #define SERVER_HSTS_DEFAULT_AGE	31536000
+#define SERVER_MAX_RANGES	4
+#define SERVER_DEF_TLS_LIFETIME	(2 * 3600)
+#define SERVER_MIN_TLS_LIFETIME	(60)
+#define SERVER_MAX_TLS_LIFETIME	(24 * 3600)
 
 #define MEDIATYPE_NAMEMAX	128	/* file name extension */
 #define MEDIATYPE_TYPEMAX	64	/* length of type/subtype */
@@ -82,12 +91,16 @@
 
 #define FCGI_CONTENT_SIZE	65535
 
+#define PROC_PARENT_SOCK_FILENO	3
+#define PROC_MAX_INSTANCES	32
+
 enum httpchunk {
 	TOREAD_UNLIMITED		= -1,
 	TOREAD_HTTP_HEADER		= -2,
 	TOREAD_HTTP_CHUNK_LENGTH	= -3,
 	TOREAD_HTTP_CHUNK_TRAILER	= -4,
-	TOREAD_HTTP_NONE		= -5
+	TOREAD_HTTP_NONE		= -5,
+	TOREAD_HTTP_RANGE		= TOREAD_HTTP_CHUNK_LENGTH
 };
 
 #if DEBUG
@@ -99,6 +112,7 @@ enum httpchunk {
 struct ctl_flags {
 	uint8_t		 cf_opts;
 	uint32_t	 cf_flags;
+	uint8_t		 cf_tls_sid[TLS_MAX_SESSION_ID_LENGTH];
 };
 
 enum key_type {
@@ -178,6 +192,7 @@ struct imsgev {
 		fatalx("bad length imsg received");		\
 } while (0)
 #define IMSG_DATA_SIZE(imsg)	((imsg)->hdr.len - IMSG_HEADER_SIZE)
+#define MAX_IMSG_DATA_SIZE	(MAX_IMSGSIZE - IMSG_HEADER_SIZE)
 
 struct ctl_conn {
 	TAILQ_ENTRY(ctl_conn)	 entry;
@@ -194,6 +209,7 @@ enum imsg_type {
 	IMSG_CTL_OK,
 	IMSG_CTL_FAIL,
 	IMSG_CTL_VERBOSE,
+	IMSG_CTL_PROCFD,
 	IMSG_CTL_RESET,
 	IMSG_CTL_SHUTDOWN,
 	IMSG_CTL_RELOAD,
@@ -208,7 +224,8 @@ enum imsg_type {
 	IMSG_CFG_DONE,
 	IMSG_LOG_ACCESS,
 	IMSG_LOG_ERROR,
-	IMSG_LOG_OPEN
+	IMSG_LOG_OPEN,
+	IMSG_TLSTICKET_REKEY
 };
 
 enum privsep_procid {
@@ -232,11 +249,9 @@ struct privsep {
 
 	struct imsgev			*ps_ievs[PROC_MAX];
 	const char			*ps_title[PROC_MAX];
-	pid_t				 ps_pid[PROC_MAX];
 	uint8_t				 ps_what[PROC_MAX];
 
 	unsigned int			 ps_instances[PROC_MAX];
-	unsigned int			 ps_ninstances;
 	unsigned int			 ps_instance;
 
 	struct control_sock		 ps_csock;
@@ -260,19 +275,50 @@ struct privsep_proc {
 	enum privsep_procid	 p_id;
 	int			(*p_cb)(int, struct privsep_proc *,
 				    struct imsg *);
-	pid_t			(*p_init)(struct privsep *,
+	void			(*p_init)(struct privsep *,
 				    struct privsep_proc *);
-	void			(*p_shutdown)(void);
-	unsigned int		 p_instance;
 	const char		*p_chroot;
 	struct privsep		*p_ps;
-	struct httpd		*p_env;
+	void			(*p_shutdown)(void);
+	struct passwd		*p_pw;
+};
+
+struct privsep_fd {
+	enum privsep_procid		 pf_procid;
+	unsigned int			 pf_instance;
 };
 
 enum fcgistate {
 	FCGI_READ_HEADER,
 	FCGI_READ_CONTENT,
 	FCGI_READ_PADDING
+};
+
+struct fcgi_data {
+	enum fcgistate		 state;
+	int			 toread;
+	int			 padding_len;
+	int			 type;
+	int			 chunked;
+	int			 end;
+	int			 status;
+	int			 headersdone;
+};
+
+struct range {
+	off_t	start;
+	off_t	end;
+};
+
+struct range_data {
+	struct range		 range[SERVER_MAX_RANGES];
+	int			 range_count;
+	int			 range_index;
+	off_t			 range_toread;
+
+	/* For the Content headers in each part */
+	struct media_type	*range_media;
+	size_t			 range_total;
 };
 
 struct client {
@@ -293,6 +339,7 @@ struct client {
 	void			*clt_descreq;
 	void			*clt_descresp;
 	int			 clt_sndbufsiz;
+	uint64_t		 clt_boundary;
 
 	int			 clt_fd;
 	struct tls		*clt_tls_ctx;
@@ -301,17 +348,15 @@ struct client {
 
 	off_t			 clt_toread;
 	size_t			 clt_headerlen;
+	int			 clt_headersdone;
 	unsigned int		 clt_persist;
+	unsigned int		 clt_pipelining;
 	int			 clt_line;
 	int			 clt_done;
 	int			 clt_chunk;
 	int			 clt_inflight;
-	enum fcgistate		 clt_fcgi_state;
-	int			 clt_fcgi_toread;
-	int			 clt_fcgi_padding_len;
-	int			 clt_fcgi_type;
-	int			 clt_fcgi_chunked;
-	int			 clt_fcgi_end;
+	struct range_data	 clt_ranges;
+	struct fcgi_data	 clt_fcgi;
 	char			*clt_remote_user;
 	struct evbuffer		*clt_srvevb;
 
@@ -405,6 +450,12 @@ struct auth {
 };
 TAILQ_HEAD(serverauth, auth);
 
+struct server_tls_ticket {
+	uint32_t	tt_id;
+	uint32_t	tt_keyrev;
+	unsigned char	tt_key[TLS_TICKET_KEY_SIZE];
+};
+
 struct server_config {
 	uint32_t		 id;
 	uint32_t		 parent_id;
@@ -421,6 +472,7 @@ struct server_config {
 	struct sockaddr_storage	 ss;
 	int			 prefixlen;
 	struct timeval		 timeout;
+	struct timeval		 requesttimeout;
 	uint32_t		 maxrequests;
 	size_t			 maxrequestbody;
 
@@ -429,11 +481,16 @@ struct server_config {
 	char			*tls_cert_file;
 	char			 tls_ciphers[NAME_MAX];
 	char			 tls_dhe_params[NAME_MAX];
-	char			 tls_ecdhe_curve[NAME_MAX];
+	char			 tls_ecdhe_curves[NAME_MAX];
 	uint8_t			*tls_key;
 	size_t			 tls_key_len;
 	char			*tls_key_file;
 	uint32_t		 tls_protocols;
+	uint8_t			*tls_ocsp_staple;
+	size_t			 tls_ocsp_staple_len;
+	char			*tls_ocsp_staple_file;
+	struct server_tls_ticket tls_ticket_key;
+	int			 tls_ticket_lifetime;
 
 	uint32_t		 flags;
 	int			 strip;
@@ -462,11 +519,19 @@ struct server_config {
 };
 TAILQ_HEAD(serverhosts, server_config);
 
+enum tls_config_type {
+	TLS_CFG_CERT,
+	TLS_CFG_KEY,
+	TLS_CFG_OCSP_STAPLE,
+};
+
 struct tls_config {
 	uint32_t		 id;
 
-	size_t			 tls_cert_len;
-	size_t			 tls_key_len;
+	enum tls_config_type	 tls_type;
+	size_t			 tls_len;
+	size_t			 tls_chunk_len;
+	size_t			 tls_chunk_offset;
 };
 
 struct server {
@@ -496,6 +561,8 @@ struct httpd {
 	char			*sc_chroot;
 	char			*sc_logdir;
 
+	uint8_t			 sc_tls_sid[TLS_MAX_SESSION_ID_LENGTH];
+
 	struct serverlist	*sc_servers;
 	struct mediatypes	*sc_mediatypes;
 	struct media_type	 sc_default_type;
@@ -513,7 +580,7 @@ int	 control_init(struct privsep *, struct control_sock *);
 int	 control_listen(struct control_sock *);
 void	 control_cleanup(struct control_sock *);
 void	 control_dispatch_imsg(int, short, void *);
-void	 control_imsg_forward(struct imsg *);
+void	 control_imsg_forward(struct privsep *, struct imsg *);
 struct ctl_conn	*
 	 control_connbyfd(int);
 
@@ -525,9 +592,11 @@ int	 load_config(const char *, struct httpd *);
 int	 cmdline_symset(char *);
 
 /* server.c */
-pid_t	 server(struct privsep *, struct privsep_proc *);
-int	 server_tls_cmp(struct server *, struct server *);
+void	 server(struct privsep *, struct privsep_proc *);
+int	 server_tls_cmp(struct server *, struct server *, int);
 int	 server_tls_load_keypair(struct server *);
+int	 server_tls_load_ocsp(struct server *);
+void	 server_generate_ticket_key(struct server_config *);
 int	 server_privinit(struct server *);
 void	 server_purge(struct server *);
 void	 serverconfig_free(struct server_config *);
@@ -568,7 +637,7 @@ SPLAY_PROTOTYPE(client_tree, client, clt_nodes, server_client_cmp);
 
 /* server_http.c */
 void	 server_http_init(struct server *);
-void	 server_http(struct httpd *);
+void	 server_http(void);
 int	 server_httpdesc_init(struct client *);
 void	 server_read_http(struct bufferevent *, void *);
 void	 server_abort_http(struct client *, unsigned int, const char *);
@@ -580,12 +649,13 @@ const char
 	*server_httperror_byid(unsigned int);
 void	 server_read_httpcontent(struct bufferevent *, void *);
 void	 server_read_httpchunks(struct bufferevent *, void *);
+void	 server_read_httprange(struct bufferevent *, void *);
 int	 server_writeheader_http(struct client *clt, struct kv *, void *);
 int	 server_headers(struct client *, void *,
 	    int (*)(struct client *, struct kv *, void *), void *);
 int	 server_writeresponse_http(struct client *);
-int	 server_response_http(struct client *, unsigned int, struct media_type *,
-	    off_t, time_t);
+int	 server_response_http(struct client *, unsigned int,
+	    struct media_type *, off_t, time_t);
 void	 server_reset_http(struct client *);
 void	 server_close_http(struct client *);
 int	 server_response(struct httpd *, struct client *);
@@ -618,9 +688,6 @@ const char	*canonicalize_host(const char *, char *, size_t);
 const char	*canonicalize_path(const char *, char *, size_t);
 size_t		 path_info(char *);
 char		*escape_html(const char *);
-void		 imsg_event_add(struct imsgev *);
-int		 imsg_compose_event(struct imsgev *, uint16_t, uint32_t,
-		    pid_t, int, void *, uint16_t);
 void		 socket_rlimit(int);
 char		*evbuffer_getline(struct evbuffer *);
 char		*get_string(uint8_t *, size_t);
@@ -663,10 +730,13 @@ const char	*print_time(struct timeval *, struct timeval *, char *, size_t);
 const char	*printb_flags(const uint32_t, const char *);
 void		 getmonotime(struct timeval *);
 
+extern struct httpd *httpd_env;
+
 /* log.c */
 void	log_init(int, int);
 void	log_procinit(const char *);
-void	log_verbose(int);
+void	log_setverbose(int);
+int	log_getverbose(void);
 void	log_warn(const char *, ...)
 	    __attribute__((__format__ (printf, 1, 2)));
 void	log_warnx(const char *, ...)
@@ -685,11 +755,14 @@ __dead void fatalx(const char *, ...)
 	    __attribute__((__format__ (printf, 1, 2)));
 
 /* proc.c */
-void	 proc_init(struct privsep *, struct privsep_proc *, unsigned int);
+enum privsep_procid
+	    proc_getid(struct privsep_proc *, unsigned int, const char *);
+void	 proc_init(struct privsep *, struct privsep_proc *, unsigned int,
+	    int, char **, enum privsep_procid);
 void	 proc_kill(struct privsep *);
-void	 proc_listen(struct privsep *, struct privsep_proc *, size_t);
+void	 proc_connect(struct privsep *);
 void	 proc_dispatch(int, short event, void *);
-pid_t	 proc_run(struct privsep *, struct privsep_proc *,
+void	 proc_run(struct privsep *, struct privsep_proc *,
 	    struct privsep_proc *, unsigned int,
 	    void (*)(struct privsep *, struct privsep_proc *, void *), void *);
 void	 proc_range(struct privsep *, enum privsep_procid, int *, int *);
@@ -707,6 +780,7 @@ struct imsgbuf *
 	 proc_ibuf(struct privsep *, enum privsep_procid, int);
 struct imsgev *
 	 proc_iev(struct privsep *, enum privsep_procid, int);
+int	 proc_flush_imsg(struct privsep *, enum privsep_procid, int);
 void	 imsg_event_add(struct imsgev *);
 int	 imsg_compose_event(struct imsgev *, uint16_t, uint32_t,
 	    pid_t, int, void *, uint16_t);
@@ -720,16 +794,16 @@ int	 config_setreset(struct httpd *, unsigned int);
 int	 config_getreset(struct httpd *, struct imsg *);
 int	 config_getcfg(struct httpd *, struct imsg *);
 int	 config_setserver(struct httpd *, struct server *);
-int	 config_settls(struct httpd *, struct server *);
+int	 config_setserver_tls(struct httpd *, struct server *);
 int	 config_getserver(struct httpd *, struct imsg *);
-int	 config_gettls(struct httpd *, struct imsg *);
+int	 config_getserver_tls(struct httpd *, struct imsg *);
 int	 config_setmedia(struct httpd *, struct media_type *);
 int	 config_getmedia(struct httpd *, struct imsg *);
 int	 config_setauth(struct httpd *, struct auth *);
 int	 config_getauth(struct httpd *, struct imsg *);
 
 /* logger.c */
-pid_t	 logger(struct privsep *, struct privsep_proc *);
+void	 logger(struct privsep *, struct privsep_proc *);
 int	 logger_open_priv(struct imsg *);
 
 #endif /* _HTTPD_H */
